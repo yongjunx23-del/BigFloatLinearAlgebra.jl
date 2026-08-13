@@ -111,6 +111,8 @@ end
                 end
                 F = BFLA.cholesky(Native, BFLA.owned_copy(A))
                 @test issuccess(F)
+                rhs = random_vector(5, p, MersenneTwister(9000 + p))
+                @test all(isfinite, BFLA.solve(F, rhs))
             end
 
             @testset "lower NaN fails closed" begin
@@ -122,5 +124,18 @@ end
                 @test_throws DomainError BFLA.cholesky(Native, A2)
             end
         end
+    end
+
+
+    @testset "solve non-finite and alias failures" begin
+        p = 192
+        F = BFLA.cholesky(Native, make_spd(3, p; seed = 9100))
+        @test_throws ArgumentError BFLA.solve!(F, view(F.factors, :, 1))
+        rhs = BFLA.owned_zeros(BigFloat, 3; precision_bits = p)
+        rhs[1] = BigFloat(Inf; precision = p)
+        @test_throws DomainError BFLA.solve!(F, rhs)
+        F.factors[2, 1] = BigFloat(NaN; precision = p)
+        finite_rhs = BFLA.owned_zeros(BigFloat, 3; precision_bits = p)
+        @test_throws DomainError BFLA.solve!(F, finite_rhs)
     end
 end

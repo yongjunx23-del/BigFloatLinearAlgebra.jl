@@ -14,11 +14,17 @@ include("types.jl")
 include("mpfr.jl")
 include("validation.jl")
 include("ownership.jl")
+include("config.jl")
+include("workspace.jl")
 include("level1.jl")
 include("level2.jl")
 include("level3.jl")
 include("triangular.jl")
 include("cholesky.jl")
+include("ldlt.jl")
+include("qr.jl")
+include("lu.jl")
+include("quality.jl")
 include("generic_backend.jl")
 include("native_backend.jl")
 
@@ -33,12 +39,25 @@ for name in (
     :_gemv!,
     :_trsv!,
     :_syr!,
+    :_symv!,
     :_gemm!,
     :_syrk!,
+    :_gemmt!,
+    :_syr2k!,
     :_trmm!,
     :_trsm!,
     :_cholesky!,
     :_cholesky_solve!,
+    :_ldlt!,
+    :_ldlt_solve!,
+    :_qr!,
+    :_apply_q!,
+    :_qr_solve!,
+    :_lu!,
+    :_lu_solve!,
+    :_residual!,
+    :_normwise_backward_error,
+    :_higher_precision_residual!,
 )
     @eval function $name(backend::AbstractBFLABackend, args...)
         _unsupported(backend, $(QuoteNode(name)), "no kernel registered for this backend")
@@ -64,17 +83,38 @@ export AbstractBFLABackend,
     capabilities,
     PrecisionMismatch,
     UnsupportedOperation,
+    FactorStatus,
+    KernelConfig,
+    BFLAWorkspace,
+    workspace_precision,
+    workspace_workers,
+    workspace_scratch!,
+    workspace_buffer!,
     AbstractBFLAFactor,
     BFLACholeskyFactor,
+    BFLALDLTFactor,
+    BFLAQRFactor,
+    BFLALUFactor,
     factor_matrix,
     factor_backend,
     factor_triangle,
     factor_precision,
     factor_status,
+    factor_kind,
+    factor_diagnostics,
+    factor_perm,
+    factor_blocks,
+    factor_inertia,
+    factor_rank,
+    factor_jpvt,
+    factor_Rdiag,
+    factor_tolerance,
+    factor_pivots,
     issuccess,
     owned_zeros,
     owned_similar,
     owned_copy,
+    convert_owned!,
     copy_owned!,
     zero_owned!,
     fill_owned!,
@@ -86,14 +126,30 @@ export AbstractBFLABackend,
     gemv!,
     trsv!,
     syr!,
+    symv!,
     gemm!,
     syrk!,
+    gemmt!,
+    syr2k!,
     trmm!,
     trsm!,
     mirror_triangle!,
     try_cholesky!,
     cholesky!,
     cholesky,
+    try_ldlt!,
+    ldlt!,
+    ldlt,
+    qr!,
+    qr,
+    applyQ!,
+    try_lu!,
+    lu!,
+    lu,
+    residual!,
+    normwise_backward_error,
+    higher_precision_residual!,
+    refine_once!,
     ldiv!,
     solve!,
     solve

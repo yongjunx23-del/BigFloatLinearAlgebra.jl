@@ -16,6 +16,7 @@ function cholesky!(
     A::AbstractMatrix{BigFloat};
     triangle::Triangle=Lower,
     check::Bool=true,
+    config::KernelConfig=KernelConfig(),
 )
     _require_square(A, "cholesky!")
     _require_valid_triangle(triangle, "cholesky!")
@@ -25,13 +26,22 @@ function cholesky!(
             A,
             "cholesky!: authoritative triangle contains non-finite entries",
         ))
-        return BFLACholeskyFactor(A, backend, triangle, p, -1)
+        return BFLACholeskyFactor(A, backend, triangle, p, FactorStatus(:nonfinite, nothing))
     end
-    info = _cholesky!(backend, A, triangle, p)
+    info = _cholesky_dispatch!(backend, A, triangle, p, config)
+    if !_triangle_finite(A, triangle)
+        check && throw(DomainError(
+            A, "cholesky!: factorization produced non-finite entries",
+        ))
+        return BFLACholeskyFactor(
+            A, backend, triangle, p, FactorStatus(:nonfinite, nothing),
+        )
+    end
     if info != 0
         check && throw(LinearAlgebra.PosDefException(info))
+        return BFLACholeskyFactor(A, backend, triangle, p, FactorStatus(:not_positive_definite, info))
     end
-    return BFLACholeskyFactor(A, backend, triangle, p, info)
+    return BFLACholeskyFactor(A, backend, triangle, p, SUCCESS_STATUS)
 end
 
 """
@@ -64,11 +74,12 @@ function cholesky(
     A::AbstractMatrix{BigFloat};
     triangle::Triangle=Lower,
     check::Bool=true,
+    config::KernelConfig=KernelConfig(),
 )
     _require_square(A, "cholesky")
     p = _require_precision(_check_precision(A), "cholesky")
     B = owned_copy(A; precision_bits=p)
-    return cholesky!(backend, B; triangle=triangle, check=check)
+    return cholesky!(backend, B; triangle=triangle, check=check, config=config)
 end
 
 # Unpack a factor and dispatch the solve through its recorded backend.
@@ -78,17 +89,37 @@ _cholesky_solve!(F::BFLACholeskyFactor, rhs::AbstractVecOrMat{BigFloat}) =
 """
     ldiv!(factor, rhs) -> rhs
 
-Solve the factorized system `factor.factors * factor.factors' * x = rhs` in
-place, overwriting `rhs` with the solution. The solve dispatches through the
-backend recorded in the factor.
+Solve the factorized system in place, overwriting `rhs` with the solution. For
+a lower factor `L` this solves `(L * Lᵀ) * x = rhs`; for an upper factor `U`
+(`GenericBackend` only) it solves `(Uᵀ * U) * x = rhs`. The solve dispatches
+through the backend recorded in the factor.
 """
 function ldiv!(F::BFLACholeskyFactor, rhs::AbstractVecOrMat{BigFloat})
-    issuccess(F) || throw(LinearAlgebra.PosDefException(F.info))
+    issuccess(F) || throw(LinearAlgebra.PosDefException(
+        F.status.position === nothing ? 0 : F.status.position,
+    ))
     n = size(F.factors, 1)
     size(rhs, 1) == n ||
         throw(DimensionMismatch("ldiv!: right-hand side dimensions differ"))
-    _require_precision(_check_precision(F.factors, rhs), "ldiv!")
-    return _cholesky_solve!(F, rhs)
+    p_actual = _require_precision(_check_precision(F.factors, rhs), "ldiv!")
+    # The factor handle records the precision it was produced at. The backing
+    # matrix is mutable, so re-verify actual storage matches the recorded
+    # precision instead of trusting factor-creation-time metadata.
+    p_actual == F.precision_bits ||
+        throw(PrecisionMismatch(F.precision_bits, p_actual, nothing))
+    _require_no_alias(rhs, F.factors, "ldiv!")
+    _triangle_finite(F.factors, F.triangle) || throw(DomainError(
+        F.factors,
+        "ldiv!: authoritative factor triangle contains non-finite entries",
+    ))
+    _all_finite(rhs) || throw(DomainError(
+        rhs, "ldiv!: right-hand side contains non-finite entries",
+    ))
+    _cholesky_solve!(F, rhs)
+    _all_finite(rhs) || throw(DomainError(
+        rhs, "ldiv!: solve produced non-finite entries",
+    ))
+    return rhs
 end
 
 """

@@ -16,13 +16,28 @@ BFLA's storage API guarantees independence:
   shape.
 - `owned_copy(A; precision_bits)` is a deep numeric copy with independent
   storage.
+- `convert_owned!(destination, source)` is the explicit reusable
+  cross-precision path. Destination precision is authoritative, source
+  elements may carry different precisions, and values are rounded into the
+  existing destination objects so destination ownership and object identity
+  are preserved. Array overlap and cross-array MPFR object sharing are
+  rejected.
 - `copy_owned!`, `zero_owned!`, and `fill_owned!` install independent MPFR
-  objects, so they are safe even for aliased input arrays.
+  objects. `copy_owned!` rejects overlapping array storage but safely breaks
+  shallow element sharing between otherwise distinct arrays. `fill_owned!` is
+  precision-strict and validates a uniform destination plus a same-precision
+  value before modifying any slot.
 
 In-place BLAS kernels require independently owned destination storage. Pass
 storage created by `owned_zeros`/`owned_similar`/`owned_copy`. A destructive
 ownership probe (which the library deliberately does not expose as a public,
 reliable predicate) lives in the test tooling.
+
+In-place LDLT validates independent ownership across its authoritative lower
+triangle before mutation. It rejects shared lower entries with `ArgumentError`;
+sharing confined to the stale upper triangle is allowed because that triangle
+is rebuilt with independent numeric copies. Allocating `ldlt` deep-copies and
+therefore repairs a pre-aliased source.
 
 ## In-place vs. allocating factorization
 

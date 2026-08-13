@@ -43,4 +43,57 @@
         C = BFLA.owned_zeros(BigFloat, 3, 3; precision_bits = 256)
         @test BFLA.gemm!(Native, NoTrans, NoTrans, one256, A, A, zero256, C) === C
     end
+
+    @testset "owned_copy strict by default, explicit conversion" begin
+        for index in (1, 3, 5)  # first, middle, last
+            v = BFLA.owned_zeros(BigFloat, 5; precision_bits = 256)
+            v[index] = BigFloat(1; precision = 64)
+            @test_throws BFLA.PrecisionMismatch BFLA.owned_copy(v)
+            @test_throws BFLA.PrecisionMismatch BFLA.owned_similar(v)
+        end
+        # Explicit precision_bits performs an intentional conversion.
+        v = BFLA.owned_zeros(BigFloat, 5; precision_bits = 256)
+        v[3] = BigFloat(1; precision = 64)
+        c = BFLA.owned_copy(v; precision_bits = 512)
+        @test all(precision(x) == 512 for x in c)
+        @test all(isfinite, c)
+    end
+
+    @testset "solve allocating path fails closed on mixed rhs" begin
+        A = make_spd(4, 256)
+        F = BFLA.cholesky(Native, BFLA.owned_copy(A))
+        for index in (1, 2, 4)  # first, middle, last
+            rhs = BFLA.owned_zeros(BigFloat, 4; precision_bits = 256)
+            rhs[index] = BigFloat(1; precision = 64)
+            @test_throws BFLA.PrecisionMismatch BFLA.solve(F, rhs)
+        end
+        # Uniform rhs succeeds.
+        rhs = BFLA.owned_zeros(BigFloat, 4; precision_bits = 256)
+        @test all(isfinite, BFLA.solve(F, rhs))
+    end
+
+    @testset "factor storage precision invariant" begin
+        A = make_spd(3, 256)
+        F = BFLA.cholesky(Native, BFLA.owned_copy(A))
+        @test factor_precision(F) == 256
+        # Mutate the backing storage to a different precision; solve must fail
+        # closed rather than trusting the recorded 256-bit metadata.
+        F.factors[1, 1] = BigFloat(2; precision = 128)
+        rhs = BFLA.owned_zeros(BigFloat, 3; precision_bits = 128)
+        @test_throws BFLA.PrecisionMismatch BFLA.ldiv!(F, rhs)
+    end
+
+    @testset "mixed precision via view/reshape yields PrecisionMismatch" begin
+        base = BFLA.owned_zeros(BigFloat, 3, 3; precision_bits = 256)
+        base[1, 2] = BigFloat(1; precision = 64)  # non-first element
+        # view into a column
+        col = view(base, :, 2)
+        @test_throws BFLA.PrecisionMismatch BFLA.dot(Native, col, col)
+        # reshape into a vector
+        rv = reshape(base, 9)
+        @test_throws BFLA.PrecisionMismatch BFLA.dot(Native, rv, rv)
+        # a transposed view
+        tv = transpose(base)
+        @test_throws BFLA.PrecisionMismatch BFLA.norminf(Native, tv)
+    end
 end

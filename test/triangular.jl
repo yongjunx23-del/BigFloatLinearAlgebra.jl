@@ -13,6 +13,7 @@
             A = random_matrix(5, 5, p, rng)
             BFLA.mirror_triangle!(A, Upper)
             @test all(A[i, j] == A[j, i] for i in 1:5, j in 1:5)
+            @test is_independently_owned(A)
         end
 
         @testset "syrk! leaves other triangle untouched p=$p" begin
@@ -28,6 +29,33 @@
             for j in 1:5, i in 1:(j - 1)
                 @test C[i, j] == marker
             end
+        end
+    end
+
+    @testset "mirror_triangle! precision failure is atomic" begin
+        p = 256
+        for (triangle, row, column) in (
+            (Lower, 3, 1),
+            (Upper, 1, 3),
+        )
+            A = random_matrix(4, 4, p, MersenneTwister(4100 + Int(triangle)))
+            A[row, column] = BigFloat(A[row, column]; precision = 128)
+            snapshot = [
+                BigFloat(value; precision = precision(value)) for value in A
+            ]
+            identities = [A[index] for index in eachindex(A)]
+
+            @test_throws BFLA.PrecisionMismatch BFLA.mirror_triangle!(
+                A, triangle,
+            )
+            @test all(
+                isequal(A[index], snapshot[position])
+                for (position, index) in enumerate(eachindex(A))
+            )
+            @test all(
+                A[index] === identities[position]
+                for (position, index) in enumerate(eachindex(A))
+            )
         end
     end
 end

@@ -9,7 +9,12 @@ assertions.
 - All dimensions are validated before a kernel runs.
 - Mismatched dimensions throw `DimensionMismatch`.
 - Validation happens once, outside the inner loops.
+- `gemmt!` and `syr2k!` validate both outer dimensions and the complete
+  contraction dimensions of their transformed operands before touching the
+  destination. A dimension failure leaves the destination unchanged.
 - One-based indexing is assumed for all dense kernels.
+- `residual!` accepts vector or matrix (multi-RHS) operands with matching
+  dimensionality; its caller-provided destination has the same shape as `b`.
 
 ## Aliasing
 
@@ -17,6 +22,9 @@ assertions.
   explicitly documented as in-place-only.
 - `Base.mightalias` is used for the check.
 - A detected unsupported alias throws `ArgumentError`.
+- Ownership conversion also accounts for cross-array MPFR object sharing that
+  `Base.mightalias` cannot see: `convert_owned!` rejects it, while
+  `copy_owned!` safely breaks it by installing fresh destination objects.
 - Within a destination array, every element must own independent MPFR storage
   (see [Ownership](ownership.md)). The library does not perform an unreliable
   runtime ownership probe on the hot path.
@@ -29,6 +37,9 @@ assertions.
   `BigFloat(value; precision = p)`, never by first rounding a literal.
 - Input precision is traced across every element, not just the first. An
   intra-array or cross-operand mismatch fails closed with `PrecisionMismatch`.
+- `fill_owned!` requires the fill value and every destination element to have
+  one precision. It completes all precision validation before replacing any
+  destination element, so a mismatch leaves the destination unchanged.
 - `NativeBackend` keeps every MPFR destination at the explicit target precision
   and never reads Julia's global `setprecision` context.
 - `GenericBackend` computes inside a scoped, lock-guarded `setprecision` block so
@@ -39,7 +50,8 @@ assertions.
 - `syrk!` updates only the requested triangle by default; the other triangle is
   neither zeroed nor mirrored.
 - `mirror_triangle!(A, triangle)` is the explicit way to complete a symmetric
-  matrix.
+  matrix. It validates the precision of every matrix element before copying;
+  a precision mismatch leaves the matrix unchanged.
 - Cholesky and triangular solves read only the authoritative triangle. The
   non-authoritative triangle may hold stale data or `NaN` and must not affect
   the result.
@@ -52,9 +64,14 @@ assertions.
 
 ## Concurrency
 
-- Phase 1 Native kernels are single-threaded but must be thread-safe.
+- Native kernels are thread-safe. Supported Level-3 paths use the explicit
+  `KernelConfig.thread_count`; the conservative default remains one worker.
 - No global mutable workspace is used.
-- Different precision contexts never share mutable MPFR scratch.
+- Worker-local scratch is independently owned, and different precision
+  contexts never share mutable MPFR scratch.
+- `BFLAWorkspace` is caller-managed storage. Kernel keywords do not claim or
+  silently ignore it; callers explicitly obtain scratch with
+  `workspace_scratch!` and `workspace_buffer!`.
 - The Generic backend serializes its scoped precision context through an
   internal lock; Native requires no lock.
 
@@ -62,10 +79,50 @@ assertions.
 
 - Unsupported operations raise `UnsupportedOperation` (or are rejected by
   `capabilities`). `capabilities(backend).cholesky_triangles` reports exactly
-  which Cholesky triangles the backend supports: `(:lower,)` for
-  `NativeBackend` and `(:lower, :upper)` for `GenericBackend`.
+  which Cholesky triangles the backend supports using the public `Triangle`
+  enum: `(Lower,)` for `NativeBackend` and `(Lower, Upper)` for
+  `GenericBackend`, so callers can test membership directly without symbol
+  translation.
 - No operation-level silent fallback exists between `NativeBackend` and
   `GenericBackend`.
+- LDLT solve, QR Q application, and QR solve dispatch through the backend
+  recorded in the factor. An unsupported recorded backend raises
+  `UnsupportedOperation` before numerical storage is modified.
+- Residual and backward-error primitives report numerical facts only. They do
+  not choose a tolerance, refinement count, precision escalation, factorization,
+  or backend fallback.
+- Higher-precision residual evaluation is only available through the explicit
+  `higher_precision_residual!` API. It requires an explicit
+  `residual_precision=q`, matching q-bit caller storage, with `q > p`, and
+  returns both factor and residual precision in its diagnostics.
+- `refine_once!` executes exactly one requested correction through the factor's
+  recorded backend. It performs all structural, alias, status, and precision
+  validation before writing outputs. Once numerical work begins, residual and
+  correction storage may be overwritten on solve failure; no rollback or
+  automatic retry is promised. Non-authoritative factor triangles remain
+  ignored.
 - `cholesky!(...; check=true)` throws `PosDefException` (or `DomainError` for
   non-finite input); `check=false` returns a factor with a nonzero `info`;
   `try_cholesky!` returns `nothing` on failure.
+- Partial-pivoting LU accepts finite square matrices only. Singular factors
+  report `FactorStatus(:singular, pivot)` with `check=false`; failed in-place
+  factorization may be partially overwritten and does not roll back or trigger
+  another factorization.
+- `KernelConfig.thread_count` is at least one. Implemented block sizes are
+  non-negative, with zero selecting the unblocked kernel. Unsupported tuning
+  fields are rejected instead of being retained as inert controls.
+
+## Factor metadata
+
+- Factor metadata accessors for pivots, permutations, and block structures
+  return defensive copies so callers cannot corrupt solve metadata.
+- `factor_matrix(F)` intentionally exposes borrowed/owned numerical storage.
+  Mutating it invalidates the numerical factor. Use-boundary checks detect
+  precision and non-finite corruption but cannot certify arbitrary numeric
+  modifications.
+- Symmetric factor storage keeps every matrix slot as an independently owned
+  MPFR value, including mirrored LDLT entries after pivoting and updates.
+- In-place LDLT rejects authoritative lower entries that share a `BigFloat`
+  object before mutation. Sharing confined to the non-authoritative upper
+  triangle is harmless because that triangle is rebuilt. Allocating LDLT
+  breaks source sharing through its ownership-safe deep copy.

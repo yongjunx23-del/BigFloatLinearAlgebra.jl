@@ -11,6 +11,7 @@ Each written entry is an independent MPFR object.
 function mirror_triangle!(A::AbstractMatrix{BigFloat}, triangle::Triangle)
     _require_square(A, "mirror_triangle!")
     _require_valid_triangle(triangle, "mirror_triangle!")
+    _check_precision(A)
     rows = axes(A, 1)
     columns = axes(A, 2)
     @inbounds for column in columns

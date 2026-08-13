@@ -86,13 +86,25 @@ capabilities(::NativeBackend) = (
     gemm = true,
     gemv = true,
     syrk = true,
+    gemmt = true,
+    symv = true,
+    syr2k = true,
     trsm = true,
     trsv = true,
     trmm = true,
     cholesky = true,
-    cholesky_triangles = (:lower,),
+    cholesky_triangles = (Lower,),
+    ldlt = true,
+    rank_revealing_qr = true,
+    lu = true,
+    multi_rhs = true,
+    residual = true,
+    backward_error = true,
+    higher_precision_residual = true,
+    refinement = true,
+    precision_conversion = true,
     factor_solve = true,
-    threading = false,
+    threading = true,
     ownership_safe = true,
 )
 
@@ -100,11 +112,23 @@ capabilities(::GenericBackend) = (
     gemm = true,
     gemv = true,
     syrk = true,
+    gemmt = true,
+    symv = true,
+    syr2k = true,
     trsm = true,
     trsv = true,
     trmm = true,
     cholesky = true,
-    cholesky_triangles = (:lower, :upper),
+    cholesky_triangles = (Lower, Upper),
+    ldlt = true,
+    rank_revealing_qr = true,
+    lu = true,
+    multi_rhs = true,
+    residual = true,
+    backward_error = true,
+    higher_precision_residual = true,
+    refinement = true,
+    precision_conversion = true,
     factor_solve = true,
     threading = false,
     ownership_safe = true,
@@ -135,6 +159,23 @@ function Base.showerror(io::IO, err::PrecisionMismatch)
               " bits at linear index ", err.index)
     end
 end
+
+"""
+    FactorStatus
+
+Machine-readable result of a factorization. `kind` is one of the symbols
+`:success`, `:not_positive_definite`, `:nonfinite`, `:singular`, or
+`:pivot_failure`; `position` is an optional 1-based pivot/failure position
+(`nothing` when it does not apply). This replaces the previous ambiguous
+integer sentinels (such as `-1` for a non-finite triangle) so that Cholesky,
+LDLᵀ, QR, and LU factors share one stable, extensible protocol.
+"""
+struct FactorStatus
+    kind::Symbol
+    position::Union{Nothing,Int}
+end
+
+const SUCCESS_STATUS = FactorStatus(:success, nothing)
 
 """
     UnsupportedOperation
@@ -179,15 +220,15 @@ Fields:
   * `backend`: the backend that produced the factor.
   * `triangle`: which triangle of `factors` is authoritative.
   * `precision_bits`: the MPFR precision of the factor storage.
-  * `info`: zero on success, or the 1-based pivot index where the
-    factorization stopped (`check=false` only).
+  * `status`: a [`FactorStatus`](@ref) describing the result (`check=false`
+    only; `check=true` throws instead of returning a failed factor).
 """
 struct BFLACholeskyFactor{M<:AbstractMatrix{BigFloat},B<:AbstractBFLABackend} <: AbstractBFLAFactor
     factors::M
     backend::B
     triangle::Triangle
     precision_bits::Int
-    info::Int
+    status::FactorStatus
 end
 
 """
@@ -220,19 +261,30 @@ Return the MPFR precision, in bits, of the factor storage.
 factor_precision(F::BFLACholeskyFactor) = F.precision_bits
 
 """
-    factor_status(F) -> Int
+    factor_status(F) -> FactorStatus
 
-Zero for a successful factorization; otherwise the 1-based pivot index where
-the factorization stopped.
+Machine-readable factorization result. On success `kind` is `:success`; a
+non-positive-definite matrix yields `:not_positive_definite` with the 1-based
+failure pivot in `position`; a non-finite authoritative triangle yields
+`:nonfinite` with `position === nothing`.
 """
-factor_status(F::BFLACholeskyFactor) = F.info
+factor_status(F::BFLACholeskyFactor) = F.status
+
+"""
+    factor_kind(F) -> Symbol
+
+Kind of factorization (`:cholesky`, `:ldlt`, `:qr`, `:lu`, ...).
+"""
+factor_kind(::BFLACholeskyFactor) = :cholesky
 
 """
     issuccess(F) -> Bool
 
 Whether the factorization succeeded.
 """
-issuccess(F::BFLACholeskyFactor) = iszero(F.info)
+issuccess(F::BFLACholeskyFactor) = F.status.kind === :success
 
 Base.size(F::BFLACholeskyFactor) = size(F.factors)
+Base.size(F::BFLACholeskyFactor, dimension::Integer) =
+    size(F.factors, dimension)
 Base.eltype(::BFLACholeskyFactor{M,B}) where {M,B} = BigFloat

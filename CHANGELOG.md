@@ -19,6 +19,23 @@ All notable changes to this project are documented here. The format is based on
   `try_cholesky!`, `cholesky!`, `cholesky`, `ldiv!`, `solve!`, and `solve`.
 - `NativeBackend` kernels extracted and generalized from the SDPX legacy
   BigFloat dense kernels (see `THIRD_PARTY_NOTICES.md`).
+- Immutable `KernelConfig` and precision-scoped `BFLAWorkspace` storage.
+- Blocked and explicitly threaded Native GEMM, SYRK, TRSM, and Cholesky paths.
+- Solver-relevant symmetric kernels: `gemmt!`, `symv!`, and `syr2k!`.
+- Symmetric-indefinite Bunch-Kaufman LDLT factors, solves, inertia, pivot
+  structure, and diagnostics.
+- Column-pivoted rank-revealing QR with explicit permutation, numerical rank,
+  R diagonal, Q/Q-transpose application, and vector/multi-RHS solve.
+- Caller-owned residual computation and normwise backward-error measurement
+  for ordinary and transposed vector/multi-RHS systems.
+- Explicit higher-precision residual computation with p/q precision diagnostics
+  and no ambient precision dependence or automatic policy decisions.
+- One-step iterative refinement through the factor's recorded backend, with
+  caller-owned residual/correction storage and before/after error diagnostics.
+- `convert_owned!` for explicit reusable conversion into caller-owned
+  destination precision while preserving destination MPFR object identity.
+- Dense square partial-pivoting LU with explicit row-swap/permutation
+  diagnostics and vector/multi-RHS solves for both backends.
 - `GenericBackend` reference implementations built on `LinearAlgebra` generic
   methods.
 
@@ -43,10 +60,53 @@ frozen legacy path.
   `BigFloat` array at the public API boundary; intra-array and cross-operand
   mismatches now fail closed with `PrecisionMismatch`.
 - `capabilities(backend)` now reports backend-specific `cholesky_triangles`
-  (`(:lower,)` for Native, `(:lower, :upper)` for Generic).
+  (`(Lower,)` for Native, `(Lower, Upper)` for Generic) using the public
+  `Triangle` enum.
 - `norminf` on an empty `BigFloat` array fails closed instead of inheriting
   ambient `setprecision`.
 - CI runs tests with an explicit `--threads` flag and asserts the real
   `Threads.nthreads()` against the matrix axis.
 - Test harness includes `test/test_utils.jl` once, removing method-overwrite
   warnings.
+- `owned_copy`/`owned_similar` now require a uniform source precision by
+  default; explicit cross-precision conversion is only via `precision_bits`.
+- `ldiv!`/`solve!` re-verify factor storage precision against the recorded
+  factor precision instead of trusting factorization-time metadata.
+- Factorization status is now a machine-readable `FactorStatus`
+  (`:success`, `:not_positive_definite`, `:nonfinite`, `:singular`,
+  `:pivot_failure`) with an optional failure position, replacing integer
+  sentinels.
+- Factor permutation, pivot, and block-structure accessors return defensive
+  copies, and all BFLA factor types support `size(F, dimension)`.
+- Cholesky, LDLT, QR, and LU factor-use boundaries reject non-finite
+  authoritative factor storage and right-hand sides before mutation, and reject
+  non-finite results instead of reporting a successful solve.
+- LDLT now treats only the lower triangle as authoritative, rebuilding the
+  inactive upper triangle before symmetric pivoting so stale or poisoned upper
+  data cannot affect the factorization.
+- Ownership conversion now distinguishes overlapping array storage from
+  cross-array sharing of mutable MPFR objects: `convert_owned!` rejects both,
+  while `copy_owned!` safely repairs the latter with fresh destination objects.
+- Native LDLT pivot decisions now use explicit factor-precision scratch for
+  absolute values and Bunch-Kaufman thresholds, independent of ambient
+  `setprecision`.
+- `gemmt!` and `syr2k!` now validate every transformed outer and contraction
+  dimension before entering a kernel, leaving the destination unchanged on
+  failure.
+- LDLT mirrored entries now use ownership-preserving MPFR copies, including
+  after 1x1 and 2x2 pivots, trailing updates, and symmetric permutations.
+- In-place LDLT now rejects pre-aliased authoritative-lower `BigFloat` entries
+  before mutation, so every successful factor satisfies the independent-storage
+  invariant without weakening lower-triangle authority.
+- LDLT solve, QR Q application, and QR solve now dispatch explicitly through
+  the backend stored in the factor and reject unsupported backends before
+  mutation.
+- `fill_owned!` now validates the fill value and the complete destination
+  precision before mutation, making precision failures atomic.
+- `mirror_triangle!` now validates complete matrix precision before copying,
+  so mixed-precision failures leave both triangles unchanged.
+- `KernelConfig` now rejects non-positive thread counts and negative block
+  sizes; the unused `ldlt_block` field was removed rather than exposing an
+  inert tuning control.
+- `BFLAWorkspace` is now documented as caller-managed scratch, and ineffective
+  `workspace=` kernel keywords were removed instead of being silently ignored.

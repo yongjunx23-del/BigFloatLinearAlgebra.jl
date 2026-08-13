@@ -1,8 +1,9 @@
 # BigFloatLinearAlgebra.jl
 
 BigFloatLinearAlgebra (BFLA) is an independent, ownership-safe dense linear
-algebra library for Julia `BigFloat` / MPFR. It provides BLAS Level 1-3 kernels
-and a Cholesky factorization/solve with two auditable backends.
+algebra library for Julia `BigFloat` / MPFR. It provides BLAS Level 1-3 kernels,
+symmetric kernels, Cholesky, symmetric-indefinite LDLT, column-pivoted QR, and
+partial-pivoting LU with two auditable backends.
 
 It is not part of SDPX and does not depend on it. SDPX is simply the first
 production consumer; the public API contains no solver concepts (KKT, Schur,
@@ -15,8 +16,8 @@ cone, certificate, LP, SDP).
   as its first argument. `capabilities(backend)` is an audit hook.
 - **Ownership-safe storage.** `BigFloat` is mutable, so `zeros(BigFloat, ...)`
   aliases one MPFR object across every slot. BFLA's `owned_zeros`,
-  `owned_copy`, `copy_owned!`, `zero_owned!`, and `fill_owned!` guarantee
-  independent MPFR objects.
+  `owned_copy`, `convert_owned!`, `copy_owned!`, `zero_owned!`, and
+  `fill_owned!` guarantee or preserve independent MPFR objects.
 - **Explicit precision.** Storage and scratch are created at a traceable bit
   precision; the Native backend never inherits Julia's ambient
   `setprecision`. Mixed-precision operands fail closed.
@@ -56,14 +57,22 @@ solve!(factor, b)
 
 ## Public API
 
-- Storage: `owned_zeros`, `owned_similar`, `owned_copy`, `copy_owned!`,
-  `zero_owned!`, `fill_owned!`.
+- Storage: `owned_zeros`, `owned_similar`, `owned_copy`, `convert_owned!`,
+  `copy_owned!`, `zero_owned!`, `fill_owned!`.
 - Level 1: `scal!`, `axpy!`, `axpby!`, `dot`, `norminf`.
-- Level 2: `gemv!`, `trsv!`, `syr!`.
-- Level 3: `gemm!`, `syrk!`, `trmm!`, `trsm!`.
+- Level 2: `gemv!`, `trsv!`, `syr!`, `symv!`.
+- Level 3: `gemm!`, `syrk!`, `gemmt!`, `syr2k!`, `trmm!`, `trsm!`.
 - Cholesky: `try_cholesky!`, `cholesky!`, `cholesky`, `ldiv!`, `solve!`,
   `solve`, `factor_matrix`, `factor_backend`, `factor_triangle`,
   `factor_precision`, `factor_status`, `issuccess`.
+- LDLT: `try_ldlt!`, `ldlt!`, `ldlt`, pivot/inertia diagnostics, and solve.
+- QR: `qr!`, `qr`, `applyQ!`, rank/permutation/R-diagonal diagnostics, and
+  overdetermined solve.
+- LU: `try_lu!`, `lu!`, `lu`, pivot/permutation diagnostics, and
+  vector/multi-RHS solve.
+- Numerical quality: caller-owned `residual!` and normwise backward-error
+  measurement for vector and multi-RHS systems, plus explicit higher-precision
+  residual diagnostics and one requested refinement correction.
 
 Only real `BigFloat` is supported in this phase.
 
@@ -74,8 +83,11 @@ Only real `BigFloat` is supported in this phase.
 | GEMM/GEMV/SYRK | yes | yes |
 | TRSM/TRSV/TRMM | yes | yes |
 | Cholesky | lower only | lower and upper |
+| LDLT / RRQR / LU | yes | yes |
+| residual / backward error | yes | yes |
+| higher-precision residual / refinement | yes | yes |
 | factor solve | yes | yes |
-| threading | single (safe) | single (serialized) |
+| threading | explicit 1+ workers | single (serialized) |
 | ownership safe | yes | yes |
 
 `NativeBackend` is extracted from the SDPX legacy BigFloat dense kernels and
@@ -91,8 +103,8 @@ julia --project=. benchmark/run_kernels.jl
 ```
 
 The unit suite covers ownership, numerical correctness (Native vs. Generic vs.
-a `2p`-bit oracle), Cholesky fixtures, failure semantics, precision, and
-concurrency. The benchmark runner reports median/IQR/min/max and allocations
+a `2p`-bit oracle), factorizations, residual/refinement, failure semantics,
+precision, and concurrency. The benchmark runner reports median/IQR/min/max and allocations
 after a correctness gate, and `benchmark/compare_sdpx_legacy.jl` is an opt-in
 SDPX parity check.
 

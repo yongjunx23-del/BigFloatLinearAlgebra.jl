@@ -81,3 +81,31 @@ function syr!(
     p = _require_precision(_check_precision(a, x, A), "syr!")
     return _syr!(backend, triangle, a, x, A, p)
 end
+
+"""
+    symv!(backend, triangle, a, A, x, b, y) -> y
+
+Symmetric matrix-vector product `y = a * A * x + b * y`, where `A` is
+symmetric and only the requested authoritative triangle is read. `y` must not
+alias `x`.
+"""
+function symv! end
+
+function symv!(
+    backend::AbstractBFLABackend,
+    triangle::Triangle,
+    a::BigFloat,
+    A::AbstractMatrix{BigFloat},
+    x::AbstractVector{BigFloat},
+    b::BigFloat,
+    y::AbstractVector{BigFloat},
+)
+    _require_valid_triangle(triangle, "symv!")
+    _require_square(A, "symv!")
+    _require_no_alias(y, x, "symv!")
+    n = size(A, 1)
+    (length(x) == n && length(y) == n) ||
+        throw(DimensionMismatch("symv!: vector/matrix dimensions differ"))
+    p = _require_precision(_check_precision(a, b, A, x, y), "symv!")
+    return _symv!(backend, triangle, a, A, x, b, y, p)
+end

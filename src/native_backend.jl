@@ -19,6 +19,63 @@
 
 @inline _scratch(p::Int) = BigFloat(0; precision = p)
 
+# Kernel dispatch. These entry points receive an already-validated `p` and
+# select blocked/threaded/unblocked Native kernels. In the initial release they
+# route to the unblocked kernels; blocked and threaded paths are added in later
+# phases and selected via `config`. GenericBackend ignores `config`
+# because it is a single-threaded reference backend.
+
+function _gemm_dispatch!(backend::NativeBackend, ::Val{TA}, ::Val{TB}, a, A, B, b, C, p, config) where {TA,TB}
+    if config.gemm_block > 0
+        return _gemm_blocked!(backend, Val{TA}(), Val{TB}(), a, A, B, b, C, p, config.gemm_block)
+    end
+    if config.thread_count > 1
+        return _gemm_threaded!(backend, Val{TA}(), Val{TB}(), a, A, B, b, C, p, config)
+    end
+    return _gemm!(backend, Val{TA}(), Val{TB}(), a, A, B, b, C, p)
+end
+
+function _syrk_dispatch!(backend::NativeBackend, triangle, ::Val{T}, a, A, b, C, p, config) where {T}
+    if config.syrk_block > 0
+        return _syrk_blocked!(backend, triangle, Val{T}(), a, A, b, C, p, config.syrk_block)
+    end
+    if config.thread_count > 1
+        return _syrk_threaded!(backend, triangle, Val{T}(), a, A, b, C, p, config)
+    end
+    return _syrk!(backend, triangle, Val{T}(), a, A, b, C, p)
+end
+
+function _trsm_dispatch!(backend::NativeBackend, side, triangle, trans, diagonal, a, A, B, p, config)
+    if config.trsm_block > 0
+        return _trsm_blocked!(backend, side, triangle, trans, diagonal, a, A, B, p, config.trsm_block)
+    end
+    if config.thread_count > 1
+        return _trsm_threaded!(backend, side, triangle, trans, diagonal, a, A, B, p, config)
+    end
+    return _trsm!(backend, side, triangle, trans, diagonal, a, A, B, p)
+end
+
+function _cholesky_dispatch!(backend::NativeBackend, A, triangle, p, config)
+    if config.cholesky_block > 0
+        return _cholesky_blocked!(backend, A, triangle, p, config.cholesky_block)
+    end
+    return _cholesky!(backend, A, triangle, p)
+end
+
+# GenericBackend ignores config.
+function _gemm_dispatch!(backend::GenericBackend, ::Val{TA}, ::Val{TB}, a, A, B, b, C, p, config) where {TA,TB}
+    return _gemm!(backend, Val{TA}(), Val{TB}(), a, A, B, b, C, p)
+end
+function _syrk_dispatch!(backend::GenericBackend, triangle, ::Val{T}, a, A, b, C, p, config) where {T}
+    return _syrk!(backend, triangle, Val{T}(), a, A, b, C, p)
+end
+function _trsm_dispatch!(backend::GenericBackend, side, triangle, trans, diagonal, a, A, B, p, config)
+    return _trsm!(backend, side, triangle, trans, diagonal, a, A, B, p)
+end
+function _cholesky_dispatch!(backend::GenericBackend, A, triangle, p, config)
+    return _cholesky!(backend, A, triangle, p)
+end
+
 @inline function _update_abs_max!(maximum_value::BigFloat, negative_maximum::BigFloat, value::BigFloat)
     if signbit(value)
         if value < negative_maximum
@@ -132,6 +189,29 @@ function _norminf(::NativeBackend, x::AbstractArray{BigFloat}, p::Int)
 end
 
 # Reduction helpers ------------------------------------------------------
+
+@inline _ga(A::AbstractMatrix{BigFloat}, i::Int, l::Int, ::Val{NoTrans}) = A[i, l]
+@inline _ga(A::AbstractMatrix{BigFloat}, i::Int, l::Int, ::Val{Trans}) = A[l, i]
+@inline _gb(B::AbstractMatrix{BigFloat}, l::Int, j::Int, ::Val{NoTrans}) = B[l, j]
+@inline _gb(B::AbstractMatrix{BigFloat}, l::Int, j::Int, ::Val{Trans}) = B[j, l]
+
+@inline function _accum_row_col!(
+    acc::BigFloat,
+    buffer::BigFloat,
+    A::AbstractMatrix{BigFloat},
+    B::AbstractMatrix{BigFloat},
+    i::Int,
+    j::Int,
+    ::Val{TA},
+    ::Val{TB},
+    k0::Int,
+    k1::Int,
+) where {TA,TB}
+    @inbounds for l in k0:k1
+        MA.buffered_operate!(buffer, MA.add_mul, acc, _ga(A, i, l, Val{TA}()), _gb(B, l, j, Val{TB}()))
+    end
+    return acc
+end
 
 @inline function _dot_row_col!(
     acc::BigFloat,
@@ -323,6 +403,43 @@ function _syr!(
     return A
 end
 
+function _symv!(
+    ::NativeBackend,
+    triangle::Triangle,
+    a::BigFloat,
+    A::AbstractMatrix{BigFloat},
+    x::AbstractVector{BigFloat},
+    b::BigFloat,
+    y::AbstractVector{BigFloat},
+    p::Int,
+)
+    n = length(x)
+    acc = _scratch(p)
+    buffer = _scratch(p)
+    alpha_is_one = isone(a)
+    beta_is_zero = iszero(b)
+    @inbounds for i in 1:n
+        MA.operate!(zero, acc)
+        if triangle === Lower
+            for j in 1:i
+                MA.buffered_operate!(buffer, MA.add_mul, acc, A[i, j], x[j])
+            end
+            for j in (i + 1):n
+                MA.buffered_operate!(buffer, MA.add_mul, acc, A[j, i], x[j])
+            end
+        else
+            for j in 1:(i - 1)
+                MA.buffered_operate!(buffer, MA.add_mul, acc, A[j, i], x[j])
+            end
+            for j in i:n
+                MA.buffered_operate!(buffer, MA.add_mul, acc, A[i, j], x[j])
+            end
+        end
+        _store_owned!(y[i], acc, buffer, a, b, alpha_is_one, beta_is_zero)
+    end
+    return y
+end
+
 # Level 3 ----------------------------------------------------------------
 
 function _gemm!(
@@ -412,6 +529,75 @@ function _syrk!(
                 _syrk_dot!(acc, buffer, A, i, j, Val{T}(), k)
                 _store_owned!(C[i, j], acc, buffer, a, b, alpha_is_one, beta_is_zero)
             end
+        end
+    end
+    return C
+end
+
+function _gemmt!(
+    ::NativeBackend,
+    triangle::Triangle,
+    ::Val{TA},
+    ::Val{TB},
+    a::BigFloat,
+    A::AbstractMatrix{BigFloat},
+    B::AbstractMatrix{BigFloat},
+    b::BigFloat,
+    C::AbstractMatrix{BigFloat},
+    p::Int,
+) where {TA,TB}
+    n = size(C, 1)
+    k = TA === NoTrans ? size(A, 2) : size(A, 1)
+    acc = _scratch(p)
+    buffer = _scratch(p)
+    alpha_is_one = isone(a)
+    beta_is_zero = iszero(b)
+    @inbounds for j in 1:n
+        ilo, ihi = triangle === Lower ? (j, n) : (1, j)
+        for i in ilo:ihi
+            MA.operate!(zero, acc)
+            for l in 1:k
+                MA.buffered_operate!(buffer, MA.add_mul, acc, _ga(A, i, l, Val{TA}()), _gb(B, l, j, Val{TB}()))
+            end
+            _store_owned!(C[i, j], acc, buffer, a, b, alpha_is_one, beta_is_zero)
+        end
+    end
+    return C
+end
+
+function _syr2k!(
+    ::NativeBackend,
+    triangle::Triangle,
+    ::Val{T},
+    a::BigFloat,
+    A::AbstractMatrix{BigFloat},
+    B::AbstractMatrix{BigFloat},
+    b::BigFloat,
+    C::AbstractMatrix{BigFloat},
+    p::Int,
+) where {T}
+    n = size(C, 1)
+    k = T === NoTrans ? size(A, 2) : size(A, 1)
+    acc = _scratch(p)
+    buffer = _scratch(p)
+    alpha_is_one = isone(a)
+    beta_is_zero = iszero(b)
+    @inbounds for j in 1:n
+        ilo, ihi = triangle === Lower ? (j, n) : (1, j)
+        for i in ilo:ihi
+            MA.operate!(zero, acc)
+            for l in 1:k
+                if T === NoTrans
+                    # A[i,l]*B[j,l] + B[i,l]*A[j,l]
+                    MA.buffered_operate!(buffer, MA.add_mul, acc, A[i, l], B[j, l])
+                    MA.buffered_operate!(buffer, MA.add_mul, acc, B[i, l], A[j, l])
+                else
+                    # A[l,i]*B[l,j] + B[l,i]*A[l,j]
+                    MA.buffered_operate!(buffer, MA.add_mul, acc, A[l, i], B[l, j])
+                    MA.buffered_operate!(buffer, MA.add_mul, acc, B[l, i], A[l, j])
+                end
+            end
+            _store_owned!(C[i, j], acc, buffer, a, b, alpha_is_one, beta_is_zero)
         end
     end
     return C
@@ -586,6 +772,331 @@ function _trsm!(
 end
 
 # Cholesky ---------------------------------------------------------------
+
+# Blocked single-threaded kernels. Selected explicitly via `KernelConfig`.
+#
+# `_gemm_blocked!` and `_syrk_blocked!` partition the reduction dimension into
+# tiles and keep the per-entry multiply-accumulate sequence in ascending
+# `l` order, so they are bit-identical to the unblocked kernels. `_cholesky_blocked!`
+# and `_trsm_blocked!` use the standard right-looking / block-triangular
+# algorithms and are validated by residual rather than bit-parity.
+
+function _gemm_blocked!(
+    ::NativeBackend,
+    ::Val{TA},
+    ::Val{TB},
+    a::BigFloat,
+    A::AbstractMatrix{BigFloat},
+    B::AbstractMatrix{BigFloat},
+    b::BigFloat,
+    C::AbstractMatrix{BigFloat},
+    p::Int,
+    bs::Int,
+) where {TA,TB}
+    m, n = size(C)
+    k = TA === NoTrans ? size(A, 2) : size(A, 1)
+    acc = _scratch(p)
+    buffer = _scratch(p)
+    alpha_is_one = isone(a)
+    beta_is_zero = iszero(b)
+    @inbounds for j0 in 1:bs:n
+        j1 = min(j0 + bs - 1, n)
+        for i0 in 1:bs:m
+            i1 = min(i0 + bs - 1, m)
+            for j in j0:j1
+                for i in i0:i1
+                    MA.operate!(zero, acc)
+                    for k0 in 1:bs:k
+                        _accum_row_col!(acc, buffer, A, B, i, j, Val{TA}(), Val{TB}(), k0, min(k0 + bs - 1, k))
+                    end
+                    _store_owned!(C[i, j], acc, buffer, a, b, alpha_is_one, beta_is_zero)
+                end
+            end
+        end
+    end
+    return C
+end
+
+function _syrk_blocked!(
+    ::NativeBackend,
+    triangle::Triangle,
+    ::Val{T},
+    a::BigFloat,
+    A::AbstractMatrix{BigFloat},
+    b::BigFloat,
+    C::AbstractMatrix{BigFloat},
+    p::Int,
+    bs::Int,
+) where {T}
+    n = size(C, 1)
+    k = T === NoTrans ? size(A, 2) : size(A, 1)
+    acc = _scratch(p)
+    buffer = _scratch(p)
+    alpha_is_one = isone(a)
+    beta_is_zero = iszero(b)
+    @inbounds for j in 1:n
+        ilo, ihi = triangle === Lower ? (j, n) : (1, j)
+        for i in ilo:ihi
+            MA.operate!(zero, acc)
+            for k0 in 1:bs:k
+                _accum_syrk!(acc, buffer, A, i, j, Val{T}(), k0, min(k0 + bs - 1, k))
+            end
+            _store_owned!(C[i, j], acc, buffer, a, b, alpha_is_one, beta_is_zero)
+        end
+    end
+    return C
+end
+
+@inline function _accum_syrk!(
+    acc::BigFloat,
+    buffer::BigFloat,
+    A::AbstractMatrix{BigFloat},
+    i::Int,
+    j::Int,
+    ::Val{NoTrans},
+    k0::Int,
+    k1::Int,
+)
+    @inbounds for l in k0:k1
+        MA.buffered_operate!(buffer, MA.add_mul, acc, A[i, l], A[j, l])
+    end
+    return acc
+end
+
+@inline function _accum_syrk!(
+    acc::BigFloat,
+    buffer::BigFloat,
+    A::AbstractMatrix{BigFloat},
+    i::Int,
+    j::Int,
+    ::Val{Trans},
+    k0::Int,
+    k1::Int,
+)
+    @inbounds for l in k0:k1
+        MA.buffered_operate!(buffer, MA.add_mul, acc, A[l, i], A[l, j])
+    end
+    return acc
+end
+
+function _cholesky_blocked!(::NativeBackend, A::AbstractMatrix{BigFloat}, triangle::Triangle, p::Int, bs::Int)
+    triangle === Lower ||
+        _unsupported(NativeBackend(), :cholesky, "NativeBackend supports triangle=Lower only in phase 1")
+    n = size(A, 1)
+    n == 0 && return 0
+    one = BigFloat(1; precision = p)
+    negone = BigFloat(-1; precision = p)
+    j0 = 1
+    while j0 <= n
+        j1 = min(j0 + bs - 1, n)
+        A11 = view(A, j0:j1, j0:j1)
+        info = _cholesky!(NativeBackend(), A11, Lower, p)
+        info != 0 && return j0 + info - 1
+        if j1 < n
+            A21 = view(A, (j1 + 1):n, j0:j1)
+            # L21 = A21 * inv(L11)^T
+            _trsm!(NativeBackend(), RightSide, Lower, Trans, NonUnitDiagonal, one, A11, A21, p)
+            A22 = view(A, (j1 + 1):n, (j1 + 1):n)
+            # A22 -= L21 * L21^T
+            _syrk!(NativeBackend(), Lower, Val(NoTrans), negone, A21, one, A22, p)
+        end
+        j0 = j1 + 1
+    end
+    return 0
+end
+
+# Explicit multithreading. Each task owns a disjoint output region and allocates
+# its own MPFR scratch, so no mutable accumulator is shared across threads.
+# Reduction order within one output entry is unchanged, so threaded results are
+# bit-identical to serial results.
+
+function _gemm_threaded!(
+    ::NativeBackend,
+    ::Val{TA},
+    ::Val{TB},
+    a::BigFloat,
+    A::AbstractMatrix{BigFloat},
+    B::AbstractMatrix{BigFloat},
+    b::BigFloat,
+    C::AbstractMatrix{BigFloat},
+    p::Int,
+    config::KernelConfig,
+) where {TA,TB}
+    m, n = size(C)
+    k = TA === NoTrans ? size(A, 2) : size(A, 1)
+    workers = _worker_count(config, n)
+    if workers <= 1
+        return _gemm!(NativeBackend(), Val{TA}(), Val{TB}(), a, A, B, b, C, p)
+    end
+    chunk = cld(n, workers)
+    @sync for w in 1:workers
+        j0 = (w - 1) * chunk + 1
+        j0 > n && continue
+        j1 = min(w * chunk, n)
+        Threads.@spawn begin
+            acc = _scratch(p)
+            buffer = _scratch(p)
+            alpha_is_one = isone(a)
+            beta_is_zero = iszero(b)
+            @inbounds for j in j0:j1
+                for i in 1:m
+                    MA.operate!(zero, acc)
+                    for l in 1:k
+                        MA.buffered_operate!(buffer, MA.add_mul, acc, _ga(A, i, l, Val{TA}()), _gb(B, l, j, Val{TB}()))
+                    end
+                    _store_owned!(C[i, j], acc, buffer, a, b, alpha_is_one, beta_is_zero)
+                end
+            end
+        end
+    end
+    return C
+end
+
+function _syrk_threaded!(
+    ::NativeBackend,
+    triangle::Triangle,
+    ::Val{T},
+    a::BigFloat,
+    A::AbstractMatrix{BigFloat},
+    b::BigFloat,
+    C::AbstractMatrix{BigFloat},
+    p::Int,
+    config::KernelConfig,
+) where {T}
+    n = size(C, 1)
+    k = T === NoTrans ? size(A, 2) : size(A, 1)
+    workers = _worker_count(config, n)
+    if workers <= 1
+        return _syrk!(NativeBackend(), triangle, Val{T}(), a, A, b, C, p)
+    end
+    chunk = cld(n, workers)
+    @sync for w in 1:workers
+        j0 = (w - 1) * chunk + 1
+        j0 > n && continue
+        j1 = min(w * chunk, n)
+        Threads.@spawn begin
+            acc = _scratch(p)
+            buffer = _scratch(p)
+            alpha_is_one = isone(a)
+            beta_is_zero = iszero(b)
+            @inbounds for j in j0:j1
+                ilo, ihi = triangle === Lower ? (j, n) : (1, j)
+                for i in ilo:ihi
+                    MA.operate!(zero, acc)
+                    for l in 1:k
+                        if T === NoTrans
+                            MA.buffered_operate!(buffer, MA.add_mul, acc, A[i, l], A[j, l])
+                        else
+                            MA.buffered_operate!(buffer, MA.add_mul, acc, A[l, i], A[l, j])
+                        end
+                    end
+                    _store_owned!(C[i, j], acc, buffer, a, b, alpha_is_one, beta_is_zero)
+                end
+            end
+        end
+    end
+    return C
+end
+
+function _trsm_threaded!(
+    ::NativeBackend,
+    side::Side,
+    triangle::Triangle,
+    trans::TransposeOp,
+    diagonal::DiagonalKind,
+    a::BigFloat,
+    A::AbstractMatrix{BigFloat},
+    B::AbstractMatrix{BigFloat},
+    p::Int,
+    config::KernelConfig,
+)
+    rhs_columns = side === LeftSide ? size(B, 2) : size(B, 1)
+    workers = _worker_count(config, rhs_columns)
+    if workers <= 1
+        return _trsm!(NativeBackend(), side, triangle, trans, diagonal, a, A, B, p)
+    end
+    _native_scale!(B, a)
+    one = BigFloat(1; precision = p)
+    if side === LeftSide
+        chunk = cld(size(B, 2), workers)
+        @sync for w in 1:workers
+            c0 = (w - 1) * chunk + 1
+            c0 > size(B, 2) && continue
+            c1 = min(w * chunk, size(B, 2))
+            Threads.@spawn begin
+                Bcol = view(B, :, c0:c1)
+                _trsm!(NativeBackend(), LeftSide, triangle, trans, diagonal, one, A, Bcol, p)
+            end
+        end
+    else
+        chunk = cld(size(B, 1), workers)
+        @sync for w in 1:workers
+            r0 = (w - 1) * chunk + 1
+            r0 > size(B, 1) && continue
+            r1 = min(w * chunk, size(B, 1))
+            Threads.@spawn begin
+                Brow = view(B, r0:r1, :)
+                _trsm!(NativeBackend(), RightSide, triangle, trans, diagonal, one, A, Brow, p)
+            end
+        end
+    end
+    return B
+end
+
+function _trsm_blocked!(
+    ::NativeBackend,
+    side::Side,
+    triangle::Triangle,
+    trans::TransposeOp,
+    diagonal::DiagonalKind,
+    a::BigFloat,
+    A::AbstractMatrix{BigFloat},
+    B::AbstractMatrix{BigFloat},
+    p::Int,
+    bs::Int,
+)
+    n = size(A, 1)
+    n == 0 && return B
+    _native_scale!(B, a)
+    one = BigFloat(1; precision = p)
+    negone = BigFloat(-1; precision = p)
+    # Left-side blocked forward/back substitution. Right-side falls back to the
+    # unblocked kernel (right-side blocking is not on the current hot path).
+    if side === LeftSide && trans === NoTrans
+        if triangle === Lower
+            j0 = 1
+            while j0 <= n
+                j1 = min(j0 + bs - 1, n)
+                L11 = view(A, j0:j1, j0:j1)
+                B1 = view(B, j0:j1, :)
+                _trsm!(NativeBackend(), LeftSide, Lower, NoTrans, diagonal, one, L11, B1, p)
+                if j1 < n
+                    L21 = view(A, (j1 + 1):n, j0:j1)
+                    B2 = view(B, (j1 + 1):n, :)
+                    _gemm!(NativeBackend(), Val(NoTrans), Val(NoTrans), negone, L21, B1, one, B2, p)
+                end
+                j0 = j1 + 1
+            end
+        else
+            j0 = n
+            while j0 >= 1
+                j1 = max(j0 - bs + 1, 1)
+                U11 = view(A, j1:j0, j1:j0)
+                B1 = view(B, j1:j0, :)
+                _trsm!(NativeBackend(), LeftSide, Upper, NoTrans, diagonal, one, U11, B1, p)
+                if j1 > 1
+                    U01 = view(A, 1:(j1 - 1), j1:j0)
+                    B0 = view(B, 1:(j1 - 1), :)
+                    _gemm!(NativeBackend(), Val(NoTrans), Val(NoTrans), negone, U01, B1, one, B0, p)
+                end
+                j0 = j1 - 1
+            end
+        end
+    else
+        return _trsm!(NativeBackend(), side, triangle, trans, diagonal, one, A, B, p)
+    end
+    return B
+end
 
 function _cholesky!(::NativeBackend, A::AbstractMatrix{BigFloat}, triangle::Triangle, p::Int)
     triangle === Lower ||

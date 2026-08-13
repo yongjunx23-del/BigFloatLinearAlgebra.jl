@@ -56,6 +56,126 @@
         BFLA.fill_owned!(dst, BigFloat(7; precision = p))
         @test is_independently_owned(dst)
         @test all(x == BigFloat(7; precision = p) for x in dst)
+
+        snapshot = BFLA.owned_copy(dst)
+        identities = [dst[index] for index in eachindex(dst)]
+        @test_throws BFLA.PrecisionMismatch BFLA.fill_owned!(
+            dst, BigFloat(8; precision = 128),
+        )
+        @test all(dst[index] == snapshot[index] for index in eachindex(dst))
+        @test all(
+            dst[index] === identities[position]
+            for (position, index) in enumerate(eachindex(dst))
+        )
+
+        mixed = BFLA.owned_copy(dst)
+        mixed[3] = BigFloat(mixed[3]; precision = 128)
+        mixed_snapshot = [
+            BigFloat(value; precision = precision(value)) for value in mixed
+        ]
+        mixed_identities = [mixed[index] for index in eachindex(mixed)]
+        @test_throws BFLA.PrecisionMismatch BFLA.fill_owned!(
+            mixed, BigFloat(9; precision = p),
+        )
+        @test all(
+            isequal(mixed[index], mixed_snapshot[position])
+            for (position, index) in enumerate(eachindex(mixed))
+        )
+        @test all(
+            mixed[index] === mixed_identities[position]
+            for (position, index) in enumerate(eachindex(mixed))
+        )
+    end
+
+    @testset "convert_owned! explicit cross-precision conversion" begin
+        for q in (128, 256, 512)
+            source = BFLA.owned_zeros(BigFloat, 5; precision_bits = 192)
+            source[1] = BigFloat(1; precision = 64)
+            source[2] = BigFloat(1 // 3; precision = 128)
+            source[3] = BigFloat(-7 // 5; precision = 192)
+            source[4] = BigFloat(BigInt(2)^100; precision = 256)
+            source[5] = BigFloat(NaN; precision = 384)
+            snapshot = [
+                BigFloat(value; precision = precision(value)) for value in source
+            ]
+
+            destination = BFLA.owned_zeros(BigFloat, 5; precision_bits = q)
+            identities = [destination[i] for i in eachindex(destination)]
+            setprecision(BigFloat, 32) do
+                @test BFLA.convert_owned!(destination, source) === destination
+            end
+            @test all(precision(value) == q for value in destination)
+            @test all(
+                destination[i] === identities[i] for i in eachindex(destination)
+            )
+            @test is_independently_owned(destination)
+            @test all(isequal(source[i], snapshot[i]) for i in eachindex(source))
+            @test all(
+                isequal(destination[i], BigFloat(source[i]; precision = q))
+                for i in eachindex(source)
+            )
+        end
+
+        destination = BFLA.owned_zeros(BigFloat, 4; precision_bits = 256)
+        source = BFLA.owned_zeros(BigFloat, 3; precision_bits = 128)
+        @test_throws DimensionMismatch BFLA.convert_owned!(destination, source)
+        @test_throws ArgumentError BFLA.convert_owned!(destination, destination)
+        @test_throws ArgumentError BFLA.convert_owned!(
+            view(destination, 1:3), view(destination, 2:4),
+        )
+        mixed_destination = BFLA.owned_zeros(BigFloat, 3; precision_bits = 256)
+        mixed_destination[2] = BigFloat(0; precision = 128)
+        @test_throws BFLA.PrecisionMismatch BFLA.convert_owned!(
+            mixed_destination, source,
+        )
+        @test_throws ArgumentError BFLA.convert_owned!(BigFloat[], BigFloat[])
+
+        # Separate array storage can still share mutable MPFR objects after a
+        # shallow copy. In-place conversion rejects that hidden alias.
+        shared_source = BFLA.owned_zeros(BigFloat, 3; precision_bits = 256)
+        for i in eachindex(shared_source)
+            shared_source[i] = BigFloat(i; precision = 256)
+        end
+        shared_destination = copy(shared_source)
+        @test !Base.mightalias(shared_destination, shared_source)
+        @test all(
+            shared_destination[i] === shared_source[i]
+            for i in eachindex(shared_source)
+        )
+        @test_throws ArgumentError BFLA.convert_owned!(
+            shared_destination, shared_source,
+        )
+
+        # The strict copy path still rejects a cross-precision operation.
+        strict_destination = BFLA.owned_zeros(BigFloat, 3; precision_bits = 256)
+        @test_throws BFLA.PrecisionMismatch BFLA.copy_owned!(
+            strict_destination, source,
+        )
+
+        # `copy_owned!` replaces slots, so it can safely repair object sharing
+        # between otherwise distinct arrays while preserving the source.
+        repaired = copy(shared_source)
+        snapshot = BFLA.owned_copy(shared_source)
+        @test BFLA.copy_owned!(repaired, shared_source) === repaired
+        @test all(
+            !(repaired[i] === shared_source[i]) for i in eachindex(repaired)
+        )
+        BFLA.MA.operate!(+, repaired[1], BigFloat(10; precision = 256))
+        @test all(
+            shared_source[i] == snapshot[i] for i in eachindex(shared_source)
+        )
+
+        overlap = BFLA.owned_zeros(BigFloat, 4; precision_bits = 256)
+        for i in eachindex(overlap)
+            overlap[i] = BigFloat(i; precision = 256)
+        end
+        overlap_snapshot = BFLA.owned_copy(overlap)
+        @test_throws ArgumentError BFLA.copy_owned!(
+            view(overlap, 2:4), view(overlap, 1:3),
+        )
+        @test all(
+            overlap[i] == overlap_snapshot[i] for i in eachindex(overlap)
+        )
     end
 
     @testset "factor storage semantics" begin

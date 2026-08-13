@@ -31,11 +31,11 @@ function measure(f::Function; warmup::Int=2, samples::Int=10)
     sort!(times)
     sort!(allocs)
     return (
-        median = times[length(times) ÷ 2 + 1],
-        iqr = times[ceil(Int, 0.75 * length(times))] - times[floor(Int, 0.25 * length(times)) + 1],
+        median = Statistics.median(times),
+        iqr = Statistics.quantile(times, 0.75) - Statistics.quantile(times, 0.25),
         min = times[1],
         max = times[end],
-        allocs = allocs[length(allocs) ÷ 2 + 1],
+        allocs = Statistics.median(allocs),
     )
 end
 
@@ -44,10 +44,20 @@ function environment()
         julia = string(VERSION),
         threads = Threads.nthreads(),
         cpu = string(Sys.CPU_NAME),
+        max_rss_bytes = Sys.maxrss(),
+        source_commit = get(ENV, "BFLA_SOURCE_COMMIT", "not supplied"),
     )
 end
 
-eps_bits(p::Int) = BigFloat(2; precision = p)^(1 - p)
+eps_bits(p::Int) = BigFloat(
+    BigFloat(2; precision = p)^(1 - p); precision = p,
+)
+
+function parse_int_tuple(name::AbstractString, default)
+    raw = strip(get(ENV, name, ""))
+    isempty(raw) && return default
+    return Tuple(parse(Int, strip(value)) for value in split(raw, ','))
+end
 
 function owned_matrix(m::Int, n::Int, p::Int, rng::AbstractRNG)
     A = BFLA.owned_zeros(BigFloat, m, n; precision_bits = p)

@@ -151,6 +151,41 @@ function _syr!(
     return A
 end
 
+function _symv!(
+    ::GenericBackend,
+    triangle::Triangle,
+    a::BigFloat,
+    A::AbstractMatrix{BigFloat},
+    x::AbstractVector{BigFloat},
+    b::BigFloat,
+    y::AbstractVector{BigFloat},
+    p::Int,
+)
+    n = length(x)
+    _with_precision(p) do
+        @inbounds for i in 1:n
+            acc = zero(BigFloat)
+            if triangle === Lower
+                for j in 1:i
+                    acc += A[i, j] * x[j]
+                end
+                for j in (i + 1):n
+                    acc += A[j, i] * x[j]
+                end
+            else
+                for j in 1:(i - 1)
+                    acc += A[j, i] * x[j]
+                end
+                for j in i:n
+                    acc += A[i, j] * x[j]
+                end
+            end
+            y[i] = a * acc + b * y[i]
+        end
+    end
+    return y
+end
+
 function _gemm!(
     ::GenericBackend,
     ::Val{TA},
@@ -204,6 +239,69 @@ function _syrk!(
                     end
                     C[i, j] = a * acc + b * C[i, j]
                 end
+            end
+        end
+    end
+    return C
+end
+
+function _gemmt!(
+    ::GenericBackend,
+    triangle::Triangle,
+    ::Val{TA},
+    ::Val{TB},
+    a::BigFloat,
+    A::AbstractMatrix{BigFloat},
+    B::AbstractMatrix{BigFloat},
+    b::BigFloat,
+    C::AbstractMatrix{BigFloat},
+    p::Int,
+) where {TA,TB}
+    n = size(C, 1)
+    k = TA === NoTrans ? size(A, 2) : size(A, 1)
+    _with_precision(p) do
+        @inbounds for j in 1:n
+            ilo, ihi = triangle === Lower ? (j, n) : (1, j)
+            for i in ilo:ihi
+                acc = zero(BigFloat)
+                for l in 1:k
+                    ai = TA === NoTrans ? A[i, l] : A[l, i]
+                    bl = TB === NoTrans ? B[l, j] : B[j, l]
+                    acc += ai * bl
+                end
+                C[i, j] = a * acc + b * C[i, j]
+            end
+        end
+    end
+    return C
+end
+
+function _syr2k!(
+    ::GenericBackend,
+    triangle::Triangle,
+    ::Val{T},
+    a::BigFloat,
+    A::AbstractMatrix{BigFloat},
+    B::AbstractMatrix{BigFloat},
+    b::BigFloat,
+    C::AbstractMatrix{BigFloat},
+    p::Int,
+) where {T}
+    n = size(C, 1)
+    k = T === NoTrans ? size(A, 2) : size(A, 1)
+    _with_precision(p) do
+        @inbounds for j in 1:n
+            ilo, ihi = triangle === Lower ? (j, n) : (1, j)
+            for i in ilo:ihi
+                acc = zero(BigFloat)
+                for l in 1:k
+                    if T === NoTrans
+                        acc += A[i, l] * B[j, l] + B[i, l] * A[j, l]
+                    else
+                        acc += A[l, i] * B[l, j] + B[l, i] * A[l, j]
+                    end
+                end
+                C[i, j] = a * acc + b * C[i, j]
             end
         end
     end

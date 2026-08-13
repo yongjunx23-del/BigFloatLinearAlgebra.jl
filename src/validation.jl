@@ -16,9 +16,11 @@ _precision_bits(::Any) = nothing
 function _precision_bits(A::AbstractArray{BigFloat})
     isempty(A) && return nothing
     p = precision(first(A))
+    position = 0
     @inbounds for index in eachindex(A)
+        position += 1
         q = precision(A[index])
-        q == p || throw(PrecisionMismatch(p, q, index))
+        q == p || throw(PrecisionMismatch(p, q, position))
     end
     return p
 end

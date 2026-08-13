@@ -21,7 +21,17 @@ using BigFloatLinearAlgebra:
     factor_backend,
     factor_triangle,
     factor_precision,
-    factor_status
+    factor_status,
+    factor_kind,
+    factor_diagnostics,
+    factor_perm,
+    factor_blocks,
+    factor_inertia,
+    factor_rank,
+    factor_jpvt,
+    factor_Rdiag,
+    factor_tolerance,
+    factor_pivots
 
 eps_bits(p::Int) = BigFloat(2; precision = p)^(1 - p)
 
