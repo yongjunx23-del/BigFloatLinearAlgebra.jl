@@ -467,12 +467,9 @@ function refine_once!(
         _require_no_alias(destination, source, "refine_once!")
     end
 
-    p = _require_precision(
-        _check_precision(factors, A, x, b, correction),
-        "refine_once!",
+    p = _validate_factor_precision(
+        factor, "refine_once!", A, x, b, correction,
     )
-    p == factor_precision(factor) ||
-        throw(PrecisionMismatch(factor_precision(factor), p, nothing))
     q = _require_precision(_check_precision(residual), "refine_once!")
     q >= p || throw(ArgumentError(
         "refine_once!: residual precision ($q) must be at least factor " *
@@ -538,7 +535,10 @@ _factor_storage_finite(F::BFLACholeskyFactor) =
     _triangle_finite(F.factors, F.triangle)
 _factor_storage_finite(F::BFLALDLTFactor) =
     _triangle_finite(F.factors, Lower)
-_factor_storage_finite(F::BFLAQRFactor) = _all_finite(F.factors)
+_factor_storage_finite(F::BFLAQRFactor) =
+    _all_finite(F.factors) && _all_finite(F.tau) &&
+    isfinite(F.tolerance) && isfinite(F.atol) && isfinite(F.rtol) &&
+    isfinite(F.reference_scale) && isfinite(F.effective_threshold)
 _factor_storage_finite(F::BFLALUFactor) = _all_finite(F.factors)
 
 function _refinement_update!(backend, x, correction, p)

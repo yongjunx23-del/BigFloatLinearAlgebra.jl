@@ -129,20 +129,68 @@ struct FactorProbeBackend <: BFLA.AbstractBFLABackend end
         @test issuccess(F)
         @test factor_status(F).kind === :success
         @test factor_kind(F) === :cholesky
+        @test factor_failure_position(F) === nothing
+    end
+
+    @testset "common factor protocol" begin
+        chol = BFLA.cholesky(Native, make_spd(3, p; seed = 5200))
+
+        symmetric = BFLA.owned_zeros(BigFloat, 3, 3; precision_bits = p)
+        symmetric[1, 1] = BigFloat(2; precision = p)
+        symmetric[2, 2] = BigFloat(-3; precision = p)
+        symmetric[3, 3] = BigFloat(4; precision = p)
+        ldltf = BFLA.ldlt(Native, symmetric)
+
+        qrf = BFLA.qr(
+            Native, random_matrix(4, 3, p, MersenneTwister(5201)),
+        )
+
+        lusource = BFLA.owned_zeros(BigFloat, 3, 3; precision_bits = p)
+        lusource[1, 1] = BigFloat(2; precision = p)
+        lusource[2, 1] = BigFloat(1; precision = p)
+        lusource[2, 2] = BigFloat(3; precision = p)
+        lusource[3, 2] = BigFloat(1; precision = p)
+        lusource[3, 3] = BigFloat(4; precision = p)
+        luf = BFLA.lu(Native, lusource)
+
+        factors = (chol, ldltf, qrf, luf)
+        @test all(issuccess, factors)
+        @test map(factor_backend, factors) == (Native, Native, Native, Native)
+        @test map(factor_precision, factors) == (p, p, p, p)
+        @test map(factor_triangle, factors) == (Lower, Lower, nothing, nothing)
+        @test all(F -> factor_failure_position(F) === nothing, factors)
+        @test all(F -> factor_status(F).kind === :success, factors)
+        @test all(F -> factor_diagnostics(F) isa NamedTuple, factors)
+
+        failed = BFLA.owned_zeros(BigFloat, 2, 2; precision_bits = p)
+        failed[1, 1] = BigFloat(1; precision = p)
+        failed[2, 1] = BigFloat(2; precision = p)
+        failed[2, 2] = BigFloat(1; precision = p)
+        failed_factor = BFLA.cholesky!(Native, failed; check = false)
+        @test factor_failure_position(failed_factor) == 2
+        @test factor_diagnostics(failed_factor).failure_position == 2
     end
 
     @testset "capabilities" begin
         caps = BFLA.capabilities(Native)
         @test caps.gemm && caps.gemv && caps.syrk && caps.trsm && caps.trsv
         @test caps.trmm && caps.cholesky && caps.ldlt && caps.lu
+        @test caps.cholesky_workspace
         @test caps.rank_revealing_qr && caps.factor_solve
+        @test !caps.unpivoted_qr
+        @test caps.qr_pivoting === :column
+        @test caps.least_squares_solve && caps.vector_solve && caps.multi_rhs
         @test caps.threading && caps.ownership_safe
         @test caps.precision_conversion
         # Generic supports everything Native does, plus upper-triangular Cholesky.
         gcaps = BFLA.capabilities(Generic)
         @test gcaps.gemm && gcaps.gemv && gcaps.syrk && gcaps.trsm && gcaps.trsv
         @test gcaps.trmm && gcaps.cholesky && gcaps.ldlt && gcaps.lu
+        @test gcaps.cholesky_workspace
         @test gcaps.rank_revealing_qr && gcaps.factor_solve
+        @test !gcaps.unpivoted_qr
+        @test gcaps.qr_pivoting === :column
+        @test gcaps.least_squares_solve && gcaps.vector_solve && gcaps.multi_rhs
         @test !gcaps.threading && gcaps.ownership_safe
         @test gcaps.precision_conversion
         @test !(caps == gcaps)

@@ -39,6 +39,15 @@ sharing confined to the stale upper triangle is allowed because that triangle
 is rebuilt with independent numeric copies. Allocating `ldlt` deep-copies and
 therefore repairs a pre-aliased source.
 
+In-place Cholesky applies the same rule to the selected authoritative triangle:
+`Lower` checks only lower entries and `Upper` checks only upper entries. The
+check completes before factorization mutation. Inactive stale, non-finite, or
+shared entries do not affect factorization, while allocating `cholesky` repairs
+source-side sharing through `owned_copy`. An optional precision-matched
+`BFLAWorkspace` reuses only the worker-local `UInt` identity buffer for this
+scan; it stores no matrix references or MPFR pointers and does not weaken the
+ownership check.
+
 ## In-place vs. allocating factorization
 
 - `cholesky!(backend, A)` borrows `A` and overwrites its authoritative triangle.

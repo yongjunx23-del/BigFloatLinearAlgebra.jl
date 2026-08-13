@@ -119,3 +119,44 @@ frozen legacy path.
 - Configurable Level-3/Cholesky dispatchers preserve the standard
   `UnsupportedOperation` contract for unregistered backends, and LDLT now
   resolves backend support before rebuilding the inactive triangle.
+
+### API and diagnostics freeze
+
+- In-place Cholesky now rejects shared mutable `BigFloat` storage within the
+  selected authoritative triangle before any numerical mutation. Inactive
+  triangle sharing remains irrelevant, and allocating Cholesky repairs aliased
+  source storage through an ownership-safe deep copy.
+- Cholesky, LDLT, RRQR, and LU now share a public factor metadata protocol,
+  including `factor_triangle` and `factor_failure_position`, so consumers do
+  not need concrete factor fields.
+- Backend capabilities now state explicitly that QR is column-pivoted and
+  rank-revealing rather than unpivoted.
+- RRQR rank selection now supports explicit absolute and relative tolerances,
+  records the largest input-column norm and effective threshold, and exposes
+  scale-aware `numerical_rank` re-evaluation plus defensive rank metadata.
+  The legacy `tol` spelling remains an absolute-only compatibility mode.
+- Public factor diagnostics now expose Cholesky diagonal range/ratio, LDLT
+  minimum 1x1 pivot and 2x2 determinant/normalized quality, and RRQR accepted
+  and rejected diagonal facts. These APIs validate live precision and finite
+  storage and do not make solver-policy decisions.
+- RRQR auxiliary metadata now participates in every factor-use precision and
+  finite check, including `refine_once!` validation before residual or
+  correction storage can be modified.
+- Add correctness-gated production-cycle, standalone, and explicit
+  block/thread benchmark runners. They report cold/warm timing, IQR,
+  allocations, RSS, precision, size, threads, block size, and source commit;
+  mutable operands are rebuilt outside standalone timed regions and fixtures
+  use exact rational values rather than Float64 staging.
+- Harden the opt-in frozen SDPX Legacy A/B so every reported operation passes
+  bitwise parity and mutable setup is excluded from operation timing.
+- Restore the frozen row/column access path for untransposed Native GEMM while
+  preserving its buffered MPFR reduction order and public validation contract.
+- Restore row-segment access in unblocked lower Native Cholesky without
+  changing authoritative-triangle, failure-position, or MPFR trajectory rules.
+- Benchmark output now reports effective thread counts and block calibration
+  skips configurations whose thread count is ignored by blocked or Cholesky
+  dispatch.
+- Cholesky can explicitly reuse a precision-matched, worker-local workspace
+  buffer for its authoritative-triangle ownership scan. The workspace stores
+  only object identifiers, preserves the exact numerical path, and is rejected
+  before matrix mutation on precision or worker mismatch.

@@ -29,6 +29,7 @@ factor_backend(F::BFLALUFactor) = F.backend
 factor_precision(F::BFLALUFactor) = F.precision_bits
 factor_status(F::BFLALUFactor) = F.status
 factor_kind(::BFLALUFactor) = :lu
+factor_triangle(::BFLALUFactor) = nothing
 factor_perm(F::BFLALUFactor) = copy(F.perm)
 issuccess(F::BFLALUFactor) = F.status.kind === :success
 
@@ -48,9 +49,10 @@ These are numerical facts only; no fallback policy is implied.
 """
 function factor_diagnostics(F::BFLALUFactor)
     return (
+        factor_kind = factor_kind(F),
         row_swap_count = count(k -> F.pivots[k] != k, eachindex(F.pivots)),
         permutation = copy(F.perm),
-        failure_position = F.status.position,
+        failure_position = factor_failure_position(F),
     )
 end
 
@@ -161,9 +163,7 @@ function ldiv!(F::BFLALUFactor, rhs::AbstractVecOrMat{BigFloat})
         "ldiv!: right-hand side dimensions differ",
     ))
     _require_no_alias(rhs, F.factors, "ldiv!")
-    p_actual = _require_precision(_check_precision(F.factors, rhs), "ldiv!")
-    p_actual == F.precision_bits ||
-        throw(PrecisionMismatch(F.precision_bits, p_actual, nothing))
+    _validate_factor_precision(F, "ldiv!", rhs)
     (_all_finite(F.factors) && _all_finite(rhs)) || throw(DomainError(
         (F, rhs), "ldiv!: factor and right-hand side must be finite",
     ))

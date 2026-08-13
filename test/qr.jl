@@ -5,7 +5,7 @@
                 A = random_matrix(6, 4, p, MersenneTwister(5000 + p))
                 F = BFLA.qr(Native, BFLA.owned_copy(A))
                 @test factor_rank(F) == 4
-                @test factor_kind(F) === :qr
+                @test factor_kind(F) === :rrqr
                 # A*P == Q*R reconstruction
                 m, n = 6, 4
                 Q = BFLA.owned_zeros(BigFloat, m, m; precision_bits = p)
@@ -115,6 +115,57 @@
                 @test factor_rank(Ftight) == 3
             end
 
+            @testset "relative-rank scale invariance" begin
+                binary_power(exponent) = begin
+                    value = BigFloat(0; precision = p)
+                    BFLA._mpfr_set_ui_2exp!(value, 1, exponent)
+                    value
+                end
+                base = BFLA.owned_zeros(BigFloat, 5, 3; precision_bits = p)
+                base[1, 2] = BigFloat(1; precision = p)
+                base[2, 1] = binary_power(-20)
+                base[3, 3] = binary_power(-80)
+                atol = BigFloat(0; precision = p)
+                rtol = binary_power(-60)
+                tighter_rtol = binary_power(-90)
+
+                for backend in (Native, Generic), exponent in (-200, -100, 0, 100, 200)
+                    scale = binary_power(exponent)
+                    A = BFLA.owned_zeros(BigFloat, size(base)...; precision_bits = p)
+                    for index in eachindex(A, base)
+                        BFLA.MA.operate_to!(A[index], *, base[index], scale)
+                    end
+                    F = BFLA.qr(backend, A; atol = atol, rtol = rtol)
+                    @test factor_kind(F) === :rrqr
+                    @test factor_triangle(F) === nothing
+                    @test factor_rank(F) == 2
+                    @test numerical_rank(F) == 2
+                    @test numerical_rank(F; atol = atol, rtol = tighter_rtol) == 3
+                    @test factor_jpvt(F)[1] == 2
+                    @test factor_rank_atol(F) == atol
+                    @test factor_rank_rtol(F) == rtol
+                    @test factor_rank_scale(F) == abs(scale)
+                    @test factor_rank_threshold(F) == rtol * abs(scale)
+                    diagnostics = factor_diagnostics(F)
+                    @test diagnostics.rank == 2
+                    @test diagnostics.reference_scale == abs(scale)
+                    @test diagnostics.effective_threshold == rtol * abs(scale)
+                    @test diagnostics.failure_position === nothing
+                    @test diagnostics.min_accepted_abs_Rdiag >
+                          diagnostics.effective_threshold
+                    @test diagnostics.next_rejected_abs_Rdiag <=
+                          diagnostics.effective_threshold
+                end
+
+                exact = BFLA.owned_copy(base)
+                exact[3, 3] = BigFloat(0; precision = p)
+                for backend in (Native, Generic)
+                    F = BFLA.qr(backend, exact; atol = atol, rtol = rtol)
+                    @test factor_rank(F) == 2
+                    @test numerical_rank(F; atol = atol, rtol = tighter_rtol) == 2
+                end
+            end
+
             @testset "applyQ orthogonal" begin
                 m = 6
                 A = random_matrix(m, 3, p, MersenneTwister(5200 + p))
@@ -139,8 +190,23 @@
         A = random_matrix(4, 3, p, MersenneTwister(5300))
         @test_throws DomainError BFLA.qr(Native, A; tol = BigFloat(-1; precision = p))
         @test_throws DomainError BFLA.qr(Native, A; tol = BigFloat(Inf; precision = p))
+        @test_throws DomainError BFLA.qr(
+            Native, A; rtol = BigFloat(-1; precision = p),
+        )
+        @test_throws DomainError BFLA.qr(
+            Native, A; atol = BigFloat(Inf; precision = p),
+        )
+        @test_throws ArgumentError BFLA.qr(
+            Native,
+            A;
+            tol = BigFloat(0; precision = p),
+            rtol = BigFloat(0; precision = p),
+        )
         @test_throws BFLA.PrecisionMismatch BFLA.qr(
             Native, A; tol = BigFloat(0; precision = 128))
+        @test_throws BFLA.PrecisionMismatch BFLA.qr(
+            Native, A; rtol = BigFloat(0; precision = 128),
+        )
         Anan = BFLA.owned_copy(A)
         Anan[2, 2] = BigFloat(NaN; precision = p)
         @test_throws DomainError BFLA.qr(Native, Anan)
@@ -153,10 +219,72 @@
         BFLA.MA.operate!(+, tolerance, BigFloat(1; precision = p))
         @test factor_matrix(F)[1, 1] == original_diagonal
         @test factor_tolerance(F) == BigFloat(0; precision = p)
+        @test factor_rank_atol(F) == BigFloat(0; precision = p)
+        @test factor_rank_rtol(F) ==
+              BigFloat(max(size(A)...); precision = p) * eps_bits(p)
+        @test factor_rank_threshold(F) ==
+              factor_rank_rtol(F) * factor_rank_scale(F)
         supplied_tol = BigFloat(1 // 100; precision = p)
         Ftolerance = BFLA.qr(Native, BFLA.owned_copy(A); tol = supplied_tol)
         BFLA.MA.operate!(zero, supplied_tol)
         @test factor_tolerance(Ftolerance) == BigFloat(1 // 100; precision = p)
+        @test factor_rank_atol(Ftolerance) == BigFloat(1 // 100; precision = p)
+        @test iszero(factor_rank_rtol(Ftolerance))
+
+        metadata = factor_diagnostics(Ftolerance)
+        BFLA.MA.operate!(zero, metadata.R_diagonal[1])
+        metadata.permutation[1] = 0
+        BFLA.MA.operate!(zero, metadata.effective_threshold)
+        @test factor_Rdiag(Ftolerance)[1] != 0
+        @test all(>(0), factor_jpvt(Ftolerance))
+        @test factor_rank_threshold(Ftolerance) == BigFloat(1 // 100; precision = p)
+
+        rank_one = BFLA.owned_zeros(BigFloat, 3, 2; precision_bits = p)
+        rank_one[1, 1] = BigFloat(4; precision = p)
+        rank_one[2, 2] = BigFloat(1 // 1000; precision = p)
+        Frankone = BFLA.qr(
+            Native,
+            rank_one;
+            atol = BigFloat(1 // 100; precision = p),
+            rtol = BigFloat(0; precision = p),
+        )
+        rank_diagnostics = factor_diagnostics(Frankone)
+        @test rank_diagnostics.rank == 1
+        @test rank_diagnostics.min_accepted_abs_Rdiag ==
+              abs(rank_diagnostics.R_diagonal[1])
+        @test rank_diagnostics.next_rejected_abs_Rdiag ==
+              abs(rank_diagnostics.R_diagonal[2])
+
+        metadata_source = BFLA.qr(Native, BFLA.owned_copy(A))
+        metadata_mixed = BFLA.BFLAQRFactor(
+            factor_matrix(metadata_source),
+            factor_backend(metadata_source),
+            factor_precision(metadata_source),
+            factor_status(metadata_source),
+            metadata_source.tau,
+            factor_jpvt(metadata_source),
+            factor_rank(metadata_source),
+            factor_tolerance(metadata_source),
+            factor_rank_atol(metadata_source),
+            factor_rank_rtol(metadata_source),
+            BigFloat(factor_rank_scale(metadata_source); precision = 128),
+            factor_rank_threshold(metadata_source),
+        )
+        @test_throws BFLA.PrecisionMismatch factor_diagnostics(metadata_mixed)
+
+        metadata_nonfinite = BFLA.qr(Native, BFLA.owned_copy(A))
+        BFLA.MA.operate_to!(
+            metadata_nonfinite.effective_threshold,
+            copy,
+            BigFloat(NaN; precision = p),
+        )
+        @test_throws DomainError factor_diagnostics(metadata_nonfinite)
+        @test_throws BFLA.PrecisionMismatch BFLA.numerical_rank(
+            F; atol = BigFloat(0; precision = 128),
+        )
+        @test_throws DomainError BFLA.numerical_rank(
+            F; rtol = BigFloat(NaN; precision = p),
+        )
         @test_throws ArgumentError BFLA.applyQ!(F, view(F.factors, :, 1))
         @test_throws ArgumentError BFLA.solve!(F, view(F.factors, :, 1))
         nonfinite_rhs = BFLA.owned_zeros(BigFloat, 4; precision_bits = p)

@@ -41,7 +41,7 @@ include(legacy_path())
 function owned_matrix(m::Int, n::Int, p::Int, rng::AbstractRNG)
     A = BFLA.owned_zeros(BigFloat, m, n; precision_bits = p)
     for j in 1:n, i in 1:m
-        A[i, j] = BigFloat(2 * rand(rng) - 1; precision = p)
+        A[i, j] = BigFloat(rand(rng, -1024:1024) // 1024; precision = p)
     end
     return A
 end

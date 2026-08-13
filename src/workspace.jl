@@ -8,10 +8,14 @@
 Caller-managed, ownership-safe scratch storage. All BigFloat storage is created
 at exactly `precision_bits` bits (never from ambient `setprecision`) and is
 split per worker so concurrent callers can reserve disjoint MPFR objects.
+Worker-local identity buffers support the explicit Cholesky ownership scan
+without retaining references or pointers to matrix elements.
 
 Use [`workspace_scratch!`](@ref) and [`workspace_buffer!`](@ref) to obtain
-worker-local scratch. BFLA kernels do not consume this storage automatically;
-the caller owns the lifetime, slot assignment, and synchronization policy.
+worker-local MPFR scratch. Cholesky can additionally consume a worker-local
+identity buffer when explicitly passed `workspace=ws`; other kernels do not
+consume workspace storage. The caller owns the lifetime, worker assignment,
+and synchronization policy, and concurrent calls must use distinct workers.
 """
 mutable struct BFLAWorkspace
     precision_bits::Int
@@ -19,6 +23,7 @@ mutable struct BFLAWorkspace
     scalar_slots::Int
     scalars::Vector{Vector{BigFloat}}
     buffers::Vector{Vector{BigFloat}}
+    identity_buffers::Vector{Vector{UInt}}
 end
 
 function BFLAWorkspace(precision_bits::Int; workers::Int = Threads.nthreads(), scalar_slots::Int = 16)
@@ -31,7 +36,35 @@ function BFLAWorkspace(precision_bits::Int; workers::Int = Threads.nthreads(), s
         scalar_slots,
         [BigFloat[] for _ in 1:workers],
         [BigFloat[] for _ in 1:workers],
+        [UInt[] for _ in 1:workers],
     )
+end
+
+function _workspace_identity_buffer(
+    ws::BFLAWorkspace,
+    worker::Int,
+    precision_bits::Int,
+    operation::AbstractString,
+)
+    ws.precision_bits == precision_bits || throw(PrecisionMismatch(
+        precision_bits, ws.precision_bits, nothing,
+    ))
+    1 <= worker <= ws.workers || throw(ArgumentError(
+        "$operation: workspace_worker must be in 1:$(ws.workers)",
+    ))
+    return ws.identity_buffers[worker]
+end
+
+function _workspace_identity_buffer(
+    ::Nothing,
+    workspace_worker::Int,
+    ::Int,
+    operation::AbstractString,
+)
+    workspace_worker == 1 || throw(ArgumentError(
+        "$operation: workspace_worker requires a workspace",
+    ))
+    return nothing
 end
 
 workspace_precision(ws::BFLAWorkspace) = ws.precision_bits

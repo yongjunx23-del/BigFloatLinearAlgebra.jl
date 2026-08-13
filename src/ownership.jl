@@ -112,9 +112,15 @@ function _require_independent_triangle_elements(
     A::AbstractMatrix{BigFloat},
     triangle::Triangle,
     operation::AbstractString,
+    identity_buffer::Union{Nothing,Vector{UInt}}=nothing,
 )
     n = size(A, 1)
-    object_ids = Vector{UInt}(undef, n * (n + 1) ÷ 2)
+    required = n * (n + 1) ÷ 2
+    object_ids = if identity_buffer === nothing
+        Vector{UInt}(undef, required)
+    else
+        resize!(identity_buffer, required)
+    end
     position = 0
     @inbounds for column in axes(A, 2), row in axes(A, 1)
         authoritative = triangle === Lower ? row >= column : row <= column
@@ -123,10 +129,13 @@ function _require_independent_triangle_elements(
         object_ids[position] = objectid(A[row, column])
     end
     sort!(object_ids; alg=Base.Sort.QuickSort)
-    possible_duplicate = any(
-        object_ids[index] == object_ids[index - 1]
-        for index in 2:length(object_ids)
-    )
+    possible_duplicate = false
+    @inbounds for index in 2:length(object_ids)
+        if object_ids[index] == object_ids[index - 1]
+            possible_duplicate = true
+            break
+        end
+    end
     possible_duplicate || return nothing
 
     # `objectid` collisions are allowed. Only the uncommon duplicate-ID path

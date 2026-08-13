@@ -69,9 +69,12 @@ assertions.
 - No global mutable workspace is used.
 - Worker-local scratch is independently owned, and different precision
   contexts never share mutable MPFR scratch.
-- `BFLAWorkspace` is caller-managed storage. Kernel keywords do not claim or
-  silently ignore it; callers explicitly obtain scratch with
-  `workspace_scratch!` and `workspace_buffer!`.
+- `BFLAWorkspace` is caller-managed storage. Cholesky explicitly accepts it to
+  reuse the `UInt` identity buffer for its ownership precheck; workspace
+  precision must match operation precision, and concurrent calls use distinct
+  worker slots. Other kernels do not accept or silently ignore it. Callers can
+  explicitly obtain MPFR scratch with `workspace_scratch!` and
+  `workspace_buffer!`.
 - The Generic backend serializes its scoped precision context through an
   internal lock; Native requires no lock.
 
@@ -85,6 +88,18 @@ assertions.
   translation.
 - No operation-level silent fallback exists between `NativeBackend` and
   `GenericBackend`.
+- QR means column-pivoted rank-revealing Householder QR (`A*P = Q*R`). Backend
+  capabilities explicitly report `unpivoted_qr = false`,
+  `rank_revealing_qr = true`, and `qr_pivoting = :column`.
+- RRQR rank uses `max(atol, rtol*reference_scale)` with the largest original
+  input-column 2-norm as `reference_scale`. The reference scale and effective
+  threshold are factor metadata, so callers can re-evaluate rank without
+  reading packed `R` fields or relying on ambient precision.
+- Every RRQR use boundary validates the packed matrix, Householder coefficients,
+  and rank-policy metadata at the recorded factor precision. Non-finite or
+  mixed-precision auxiliary metadata is rejected before caller-owned output is
+  modified, including before `refine_once!` writes residual or correction
+  storage.
 - LDLT solve, QR Q application, and QR solve dispatch through the backend
   recorded in the factor. An unsupported recorded backend raises
   `UnsupportedOperation` before numerical storage is modified.
@@ -122,7 +137,25 @@ assertions.
   modifications.
 - Symmetric factor storage keeps every matrix slot as an independently owned
   MPFR value, including mirrored LDLT entries after pivoting and updates.
+- In-place Cholesky rejects shared `BigFloat` objects within its authoritative
+  triangle before numerical mutation. Sharing confined to the inactive
+  triangle is ignored; allocating Cholesky repairs source sharing through its
+  ownership-safe deep copy.
 - In-place LDLT rejects authoritative lower entries that share a `BigFloat`
   object before mutation. Sharing confined to the non-authoritative upper
   triangle is harmless because that triangle is rebuilt. Allocating LDLT
   breaks source sharing through its ownership-safe deep copy.
+- Every factor exposes the common public metadata protocol:
+  `factor_matrix`, `factor_backend`, `factor_precision`, `factor_status`,
+  `factor_kind`, `factor_triangle`, `factor_failure_position`,
+  `factor_diagnostics`, and `issuccess`. Consumers do not need concrete-field
+  access. Factor-specific permutation, pivot, block, and rank accessors return
+  defensive copies where their result is mutable.
+- Diagnostics report numerical facts without policy. Cholesky diagonal ratios,
+  LDLT pivot magnitudes/determinants, RRQR accepted/rejected diagonals, and LU
+  row-swap metadata never trigger a fallback, precision escalation, acceptance
+  threshold, or automatic refinement.
+- LDLT normalized 2x2 block quality is defined as
+  `abs(det(Dblock))/max(abs(d11),abs(d12),abs(d22))^2`; it is `nothing` when no
+  2x2 block exists. This is a reported scale-free quantity, not a stability
+  decision.

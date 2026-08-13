@@ -334,6 +334,48 @@
         @test_throws ArgumentError BFLA.refine_once!(
             bad_factor, A[1:2, 1:2], badx, badb, badr, badd,
         )
+
+        qr_factor = BFLA.qr(Native, A)
+        qr_x = BFLA.solve(qr_factor, b)
+        qr_r = BFLA.owned_zeros(BigFloat, 3; precision_bits = q)
+        qr_d = BFLA.owned_zeros(BigFloat, 3; precision_bits = p)
+        qr_x0 = BFLA.owned_copy(qr_x)
+        qr_r0 = BFLA.owned_copy(qr_r)
+        qr_d0 = BFLA.owned_copy(qr_d)
+        BFLA.MA.operate_to!(
+            qr_factor.effective_threshold,
+            copy,
+            BigFloat(NaN; precision = p),
+        )
+        @test_throws DomainError BFLA.refine_once!(
+            qr_factor, A, qr_x, b, qr_r, qr_d,
+        )
+        @test qr_x == qr_x0 && qr_r == qr_r0 && qr_d == qr_d0
+
+        clean_qr = BFLA.qr(Native, A)
+        mixed_qr = BFLA.BFLAQRFactor(
+            factor_matrix(clean_qr),
+            factor_backend(clean_qr),
+            factor_precision(clean_qr),
+            factor_status(clean_qr),
+            clean_qr.tau,
+            factor_jpvt(clean_qr),
+            factor_rank(clean_qr),
+            factor_tolerance(clean_qr),
+            factor_rank_atol(clean_qr),
+            factor_rank_rtol(clean_qr),
+            BigFloat(factor_rank_scale(clean_qr); precision = 64),
+            factor_rank_threshold(clean_qr),
+        )
+        mixed_x = BFLA.solve(clean_qr, b)
+        mixed_r = BFLA.owned_zeros(BigFloat, 3; precision_bits = q)
+        mixed_d = BFLA.owned_zeros(BigFloat, 3; precision_bits = p)
+        mixed_x0 = BFLA.owned_copy(mixed_x)
+        @test_throws BFLA.PrecisionMismatch BFLA.refine_once!(
+            mixed_qr, A, mixed_x, b, mixed_r, mixed_d,
+        )
+        @test mixed_x == mixed_x0
+        @test all(iszero, mixed_r) && all(iszero, mixed_d)
     end
 
     @testset "refinement capability" begin

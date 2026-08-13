@@ -444,6 +444,43 @@ end
 
 function _gemm!(
     ::NativeBackend,
+    ::Val{NoTrans},
+    ::Val{NoTrans},
+    a::BigFloat,
+    A::AbstractMatrix{BigFloat},
+    B::AbstractMatrix{BigFloat},
+    b::BigFloat,
+    C::AbstractMatrix{BigFloat},
+    p::Int,
+)
+    acc = _scratch(p)
+    buffer = _scratch(p)
+    alpha_is_one = isone(a)
+    beta_is_zero = iszero(b)
+    @inbounds for j in axes(C, 2)
+        B_column = view(B, :, j)
+        for i in axes(C, 1)
+            A_row = view(A, i, :)
+            MA.operate!(zero, acc)
+            for index in eachindex(A_row, B_column)
+                MA.buffered_operate!(
+                    buffer,
+                    MA.add_mul,
+                    acc,
+                    A_row[index],
+                    B_column[index],
+                )
+            end
+            _store_owned!(
+                C[i, j], acc, buffer, a, b, alpha_is_one, beta_is_zero,
+            )
+        end
+    end
+    return C
+end
+
+function _gemm!(
+    ::NativeBackend,
     ::Val{TA},
     ::Val{TB},
     a::BigFloat,
@@ -1108,9 +1145,12 @@ function _cholesky!(::NativeBackend, A::AbstractMatrix{BigFloat}, triangle::Tria
     difference = _scratch(p)
     @inbounds for j in 1:k
         if j > 1
+            L_j = view(A, j, 1:(j - 1))
             MA.operate!(zero, acc)
-            for l in 1:(j - 1)
-                MA.buffered_operate!(buffer, MA.add_mul, acc, A[j, l], A[j, l])
+            for index in eachindex(L_j)
+                MA.buffered_operate!(
+                    buffer, MA.add_mul, acc, L_j[index], L_j[index],
+                )
             end
             MA.operate_to!(difference, -, A[j, j], acc)
             djj = difference
@@ -1122,9 +1162,17 @@ function _cholesky!(::NativeBackend, A::AbstractMatrix{BigFloat}, triangle::Tria
         Ljj = A[j, j]
         for i in (j + 1):k
             if j > 1
+                L_i = view(A, i, 1:(j - 1))
+                L_j = view(A, j, 1:(j - 1))
                 MA.operate!(zero, acc)
-                for l in 1:(j - 1)
-                    MA.buffered_operate!(buffer, MA.add_mul, acc, A[i, l], A[j, l])
+                for index in eachindex(L_i, L_j)
+                    MA.buffered_operate!(
+                        buffer,
+                        MA.add_mul,
+                        acc,
+                        L_i[index],
+                        L_j[index],
+                    )
                 end
                 MA.operate_to!(difference, -, A[i, j], acc)
                 numerator = difference

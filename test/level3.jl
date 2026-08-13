@@ -15,6 +15,43 @@ function triangular_matrix(n::Int, p::Int, rng::AbstractRNG, triangle, diag)
     return T
 end
 
+function legacy_style_gemm_notrans!(C, a, A, B, b, p)
+    accumulator = BigFloat(0; precision = p)
+    multiplication_buffer = BigFloat(0; precision = p)
+    alpha_is_one = isone(a)
+    beta_is_zero = iszero(b)
+    @inbounds for column in axes(C, 2)
+        B_column = view(B, :, column)
+        for row in axes(C, 1)
+            A_row = view(A, row, :)
+            BFLA.MA.operate!(zero, accumulator)
+            for index in eachindex(A_row, B_column)
+                BFLA.MA.buffered_operate!(
+                    multiplication_buffer,
+                    BFLA.MA.add_mul,
+                    accumulator,
+                    A_row[index],
+                    B_column[index],
+                )
+            end
+            if !beta_is_zero
+                BFLA.MA.operate_to!(
+                    multiplication_buffer, *, b, C[row, column],
+                )
+            end
+            if alpha_is_one
+                BFLA.MA.operate_to!(C[row, column], copy, accumulator)
+            else
+                BFLA.MA.operate_to!(C[row, column], *, a, accumulator)
+            end
+            beta_is_zero || BFLA.MA.operate!(
+                +, C[row, column], multiplication_buffer,
+            )
+        end
+    end
+    return C
+end
+
 @testset "level3" begin
     for p in (128, 256, 512)
         rng = MersenneTwister(3000 + p)
@@ -49,6 +86,40 @@ end
             C2 = BFLA.owned_copy(C0; precision_bits = q)
             BFLA.gemm!(Generic, NoTrans, NoTrans, BigFloat(a; precision = q), A2, B2, BigFloat(b; precision = q), C2)
             assert_close(Cn, round_precision(C2, p), p; label = "gemm! ref")
+
+            # The optimized NoTrans/NoTrans path preserves the frozen
+            # row/column reduction trajectory, including nontrivial scaling.
+            Atrajectory = BFLA.owned_zeros(
+                BigFloat, 4, 5; precision_bits = p,
+            )
+            Btrajectory = BFLA.owned_zeros(
+                BigFloat, 5, 3; precision_bits = p,
+            )
+            Ctrajectory = BFLA.owned_zeros(
+                BigFloat, 4, 3; precision_bits = p,
+            )
+            for j in axes(Atrajectory, 2), i in axes(Atrajectory, 1)
+                Atrajectory[i, j] = BigFloat((7i - 3j) // 16; precision = p)
+            end
+            for j in axes(Btrajectory, 2), i in axes(Btrajectory, 1)
+                Btrajectory[i, j] = BigFloat((5i + 2j) // 32; precision = p)
+            end
+            for j in axes(Ctrajectory, 2), i in axes(Ctrajectory, 1)
+                Ctrajectory[i, j] = BigFloat((i - 4j) // 64; precision = p)
+            end
+            alpha = BigFloat(3 // 8; precision = p)
+            beta = BigFloat(-5 // 16; precision = p)
+            expected = BFLA.owned_copy(Ctrajectory)
+            legacy_style_gemm_notrans!(
+                expected, alpha, Atrajectory, Btrajectory, beta, p,
+            )
+            actual = BFLA.owned_copy(Ctrajectory)
+            BFLA.gemm!(
+                Native, NoTrans, NoTrans, alpha, Atrajectory, Btrajectory,
+                beta, actual,
+            )
+            @test actual == expected
+            @test is_independently_owned(actual)
         end
 
         @testset "syrk! p=$p" begin
