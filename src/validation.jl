@@ -4,22 +4,35 @@
 """
     _precision_bits(x) -> Union{Nothing,Int}
 
-Return the MPFR precision, in bits, of a `BigFloat` scalar or of the first
-element of a non-empty `BigFloat` array. `nothing` is returned for empty arrays
-and non-`BigFloat` values, which the precision checker ignores.
+Return the MPFR precision, in bits, of a `BigFloat` scalar, or the uniform
+precision of a non-empty `BigFloat` array. For arrays this performs a full scan
+and throws [`PrecisionMismatch`](@ref) if any element differs from the first,
+so a mixed-precision array fails closed at the public boundary. `nothing` is
+returned for empty arrays and non-`BigFloat` values, which the checker ignores.
 """
 _precision_bits(x::BigFloat) = precision(x)
-_precision_bits(A::AbstractArray{BigFloat}) =
-    isempty(A) ? nothing : precision(first(A))
 _precision_bits(::Any) = nothing
+
+function _precision_bits(A::AbstractArray{BigFloat})
+    isempty(A) && return nothing
+    p = precision(first(A))
+    @inbounds for index in eachindex(A)
+        q = precision(A[index])
+        q == p || throw(PrecisionMismatch(p, q, index))
+    end
+    return p
+end
 
 """
     _check_precision(args...) -> Union{Nothing,Int}
 
 Verify that every `BigFloat` scalar and every non-empty `BigFloat` array in
-`args` carries the same MPFR precision. Mismatches fail closed with an
-`ArgumentError`. Returns the common precision, or `nothing` when no BigFloat
-value is present.
+`args` carries a single, uniform MPFR precision. Intra-array and cross-operand
+mismatches fail closed with [`PrecisionMismatch`](@ref). Returns the common
+precision, or `nothing` when no `BigFloat` value is present.
+
+This runs exactly once at the public API boundary; the internal `_*` kernels
+receive the already-validated precision and do not re-scan their inputs.
 """
 function _check_precision(args...)
     common = nothing
@@ -29,9 +42,7 @@ function _check_precision(args...)
         if common === nothing
             common = p
         elseif common != p
-            throw(ArgumentError(
-                "BigFloat precision mismatch: expected $(common) bits, found $(p) bits",
-            ))
+            throw(PrecisionMismatch(common, p, nothing))
         end
     end
     return common

@@ -1,8 +1,3 @@
-using Test
-import BigFloatLinearAlgebra
-
-const BFLA = BigFloatLinearAlgebra
-
 @testset "mpfr wrappers" begin
     for p in (128, 256, 512)
         dst = BigFloat(0; precision = p)

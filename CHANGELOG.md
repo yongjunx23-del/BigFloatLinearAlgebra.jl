@@ -36,3 +36,17 @@ caused by runtime `Val` dispatch boxing mutable MPFR scratch. GEMM/SYRK now
 allocate a constant number of bytes (matching the SDPX legacy owned kernels),
 and Cholesky, TRSM, and `dot` are at allocation parity or better than the
 frozen legacy path.
+
+### Changed
+
+- Enforce a uniform-precision invariant across every element of every
+  `BigFloat` array at the public API boundary; intra-array and cross-operand
+  mismatches now fail closed with `PrecisionMismatch`.
+- `capabilities(backend)` now reports backend-specific `cholesky_triangles`
+  (`(:lower,)` for Native, `(:lower, :upper)` for Generic).
+- `norminf` on an empty `BigFloat` array fails closed instead of inheriting
+  ambient `setprecision`.
+- CI runs tests with an explicit `--threads` flag and asserts the real
+  `Threads.nthreads()` against the matrix axis.
+- Test harness includes `test/test_utils.jl` once, removing method-overwrite
+  warnings.

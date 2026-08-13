@@ -1,13 +1,3 @@
-using Test
-using Random
-import BigFloatLinearAlgebra
-
-const BFLA = BigFloatLinearAlgebra
-const Native = BFLA.NativeBackend()
-const Generic = BFLA.GenericBackend()
-
-include("test_utils.jl")
-
 @testset "triangular" begin
     for p in (128, 256)
         rng = MersenneTwister(4000 + p)

@@ -28,7 +28,7 @@ See [docs/src](docs/src) for the frozen backend/ownership/precision contracts.
 ## Install
 
 ```julia
-import Pkg; Pkg.add(url="<path-to-this-repository>")
+import Pkg; Pkg.add(url="https://github.com/yongjunx23-del/BigFloatLinearAlgebra.jl")
 ```
 
 ## Quick start

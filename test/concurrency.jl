@@ -1,14 +1,13 @@
-using Test
-using Random
-import BigFloatLinearAlgebra
-
-const BFLA = BigFloatLinearAlgebra
-const Native = BFLA.NativeBackend()
-const Generic = BFLA.GenericBackend()
-
-include("test_utils.jl")
-
 @testset "concurrency" begin
+    # CI passes EXPECTED_JULIA_THREADS so the thread matrix is verifiably real,
+    # not just a nominal matrix axis. Local runs without the env var skip this.
+    @testset "runtime thread count matches expectation" begin
+        if haskey(ENV, "EXPECTED_JULIA_THREADS")
+            expected = parse(Int, ENV["EXPECTED_JULIA_THREADS"])
+            @test Threads.nthreads() == expected
+        end
+    end
+
     p = 256
     rng = MersenneTwister(7000)
     A = random_matrix(20, 20, p, rng)

@@ -1,13 +1,3 @@
-using Test
-using Random
-import BigFloatLinearAlgebra
-
-const BFLA = BigFloatLinearAlgebra
-const Native = BFLA.NativeBackend()
-const Generic = BFLA.GenericBackend()
-
-include("test_utils.jl")
-
 function triangular_matrix(n::Int, p::Int, rng::AbstractRNG, triangle, diag)
     T = BFLA.owned_zeros(BigFloat, n, n; precision_bits = p)
     for j in 1:n, i in 1:n

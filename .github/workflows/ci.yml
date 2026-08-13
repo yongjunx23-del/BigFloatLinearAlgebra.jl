@@ -20,6 +20,11 @@ jobs:
           version: ${{ matrix.julia-version }}
       - uses: julia-actions/cache@v2
       - uses: julia-actions/julia-buildpkg@v1
-      - uses: julia-actions/julia-runtest@v1
-        with:
-          threads: ${{ matrix.threads }}
+      # Run tests directly with an explicit `--threads` flag so the thread
+      # count is real. `EXPECTED_JULIA_THREADS` lets test/concurrency.jl assert
+      # `Threads.nthreads()` matches the matrix axis instead of trusting the
+      # axis name alone.
+      - name: Test (verify thread count)
+        run: julia --project=. --threads=${{ matrix.threads }} test/runtests.jl
+        env:
+          EXPECTED_JULIA_THREADS: ${{ matrix.threads }}

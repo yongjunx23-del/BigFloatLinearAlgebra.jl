@@ -1,13 +1,3 @@
-using Test
-using Random
-import BigFloatLinearAlgebra
-
-const BFLA = BigFloatLinearAlgebra
-const Native = BFLA.NativeBackend()
-const Generic = BFLA.GenericBackend()
-
-include("test_utils.jl")
-
 function assert_close_scalar(x::BigFloat, ref::BigFloat, p::Int; label::AbstractString="")
     err = abs(x - ref)
     scale = abs(ref) + eps_bits(p)
@@ -45,6 +35,11 @@ end
             vnan[1] = BigFloat(NaN; precision = p)
             @test isnan(BFLA.norminf(Native, vnan))
             @test isnan(BFLA.norminf(Generic, vnan))
+        end
+
+        @testset "norminf empty fails closed" begin
+            @test_throws ArgumentError BFLA.norminf(Native, BigFloat[])
+            @test_throws ArgumentError BFLA.norminf(Generic, BigFloat[])
         end
 
         @testset "scal! p=$p" begin

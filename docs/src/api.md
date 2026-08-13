@@ -10,6 +10,10 @@ capabilities(NativeBackend())
 capabilities(GenericBackend())
 ```
 
+`cholesky_triangles` in the returned capability tuple enumerates the
+authoritative Cholesky triangles: `(:lower,)` for `NativeBackend`, and
+`(:lower, :upper)` for `GenericBackend`.
+
 ## Storage
 
 ```julia

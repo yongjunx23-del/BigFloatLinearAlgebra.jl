@@ -3,17 +3,7 @@
 # reference, rather than only comparing Native against Generic (which could
 # share a conceptual mistake). Added in response to an external code review.
 
-using Test
-using Random
-import BigFloatLinearAlgebra
-
-const BFLA = BigFloatLinearAlgebra
-const Native = BFLA.NativeBackend()
-const Generic = BFLA.GenericBackend()
-
-include("test_utils.jl")
-
-function triangular_matrix(n::Int, p::Int, rng::AbstractRNG, triangle, diag)
+function triangular_matrix_adversarial(n::Int, p::Int, rng::AbstractRNG, triangle, diag)
     T = BFLA.owned_zeros(BigFloat, n, n; precision_bits = p)
     for j in 1:n, i in 1:n
         if triangle === Lower && i < j
@@ -103,7 +93,7 @@ end
         @testset "trsv! all flags p=$p" begin
             n = 9
             for triangle in (Lower, Upper), trans in (NoTrans, Trans), diag in (UnitDiagonal, NonUnitDiagonal)
-                A = triangular_matrix(n, p, rng, triangle, diag)
+                A = triangular_matrix_adversarial(n, p, rng, triangle, diag)
                 b = random_vector(n, p, rng)
                 b0 = BFLA.owned_copy(b)
                 x = BFLA.owned_copy(b)
@@ -119,7 +109,7 @@ end
             n, r = 8, 5
             alpha = BigFloat(2; precision = p)
             for side in (LeftSide, RightSide), triangle in (Lower, Upper), trans in (NoTrans, Trans), diag in (UnitDiagonal, NonUnitDiagonal)
-                A = triangular_matrix(n, p, rng, triangle, diag)
+                A = triangular_matrix_adversarial(n, p, rng, triangle, diag)
                 B0 = side === LeftSide ? random_matrix(n, r, p, rng) : random_matrix(r, n, p, rng)
                 X = BFLA.owned_copy(B0)
                 BFLA.trsm!(Native, side, triangle, trans, diag, alpha, A, X)
@@ -144,7 +134,7 @@ end
             n, r = 8, 5
             alpha = BigFloat(2; precision = p)
             for side in (LeftSide, RightSide), triangle in (Lower, Upper), trans in (NoTrans, Trans), diag in (UnitDiagonal, NonUnitDiagonal)
-                A = triangular_matrix(n, p, rng, triangle, diag)
+                A = triangular_matrix_adversarial(n, p, rng, triangle, diag)
                 B0 = side === LeftSide ? random_matrix(n, r, p, rng) : random_matrix(r, n, p, rng)
                 X = BFLA.owned_copy(B0)
                 BFLA.trmm!(Native, side, triangle, trans, diag, alpha, A, X)

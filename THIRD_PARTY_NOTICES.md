@@ -2,8 +2,18 @@
 
 The `NativeBackend` kernels in `src/native_backend.jl` and `src/mpfr.jl` are
 extracted and generalized from the BigFloat dense kernels in
-`SDPX.jl` (`src/kernels/bigfloat.jl`, commit lineage documented in
-`CHANGELOG.md`).
+`SDPX.jl`.
+
+Extraction provenance:
+
+- source repository: <https://github.com/yongjunx23-del/SDPX.jl>
+- source path: `src/kernels/bigfloat.jl`
+- source commit SHA: TODO: provenance commit not yet verified
+
+The extraction was performed against the SDPX working tree while
+`src/kernels/bigfloat.jl` had `d6b2198` ("Revert unstable BigFloat reciprocal
+reuse") as its most recent commit, but the exact snapshot commit was not
+recorded at the time. Pin this to a verified commit before a formal release.
 
 SDPX.jl is distributed under the MIT License:
 

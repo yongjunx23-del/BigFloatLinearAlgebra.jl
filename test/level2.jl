@@ -1,13 +1,3 @@
-using Test
-using Random
-import BigFloatLinearAlgebra
-
-const BFLA = BigFloatLinearAlgebra
-const Native = BFLA.NativeBackend()
-const Generic = BFLA.GenericBackend()
-
-include("test_utils.jl")
-
 function lower_triangular(n::Int, p::Int, rng::AbstractRNG; unit::Bool=false)
     L = BFLA.owned_zeros(BigFloat, n, n; precision_bits = p)
     for j in 1:n, i in j:n

@@ -1,13 +1,3 @@
-using Test
-using Random
-import BigFloatLinearAlgebra
-
-const BFLA = BigFloatLinearAlgebra
-const Native = BFLA.NativeBackend()
-const Generic = BFLA.GenericBackend()
-
-include("test_utils.jl")
-
 function solve_residual(S::AbstractMatrix{BigFloat}, x::AbstractVecOrMat{BigFloat}, b::AbstractVecOrMat{BigFloat})
     p = precision(first(S))
     R = BFLA.owned_zeros(BigFloat, size(b)...; precision_bits = p)

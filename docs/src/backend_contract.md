@@ -27,8 +27,8 @@ assertions.
 - `Float64` is never used as a staging type for `BigFloat` intermediates.
 - Constants are built with `zero(T)`, `one(T)`, or an explicit
   `BigFloat(value; precision = p)`, never by first rounding a literal.
-- Input precision is traced. A mismatch between `BigFloat` operands fails closed
-  with `ArgumentError`.
+- Input precision is traced across every element, not just the first. An
+  intra-array or cross-operand mismatch fails closed with `PrecisionMismatch`.
 - `NativeBackend` keeps every MPFR destination at the explicit target precision
   and never reads Julia's global `setprecision` context.
 - `GenericBackend` computes inside a scoped, lock-guarded `setprecision` block so
@@ -61,7 +61,9 @@ assertions.
 ## Failure semantics
 
 - Unsupported operations raise `UnsupportedOperation` (or are rejected by
-  `capabilities`).
+  `capabilities`). `capabilities(backend).cholesky_triangles` reports exactly
+  which Cholesky triangles the backend supports: `(:lower,)` for
+  `NativeBackend` and `(:lower, :upper)` for `GenericBackend`.
 - No operation-level silent fallback exists between `NativeBackend` and
   `GenericBackend`.
 - `cholesky!(...; check=true)` throws `PosDefException` (or `DomainError` for

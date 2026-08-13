@@ -61,11 +61,18 @@ end
     norminf(backend, x) -> BigFloat
 
 Infinity norm `maximum(abs, x)`. Returns `NaN` if any element is `NaN`.
+
+An empty `BigFloat` array has no elements from which to infer a precision, so
+`norminf(backend, BigFloat[])` fails closed with an `ArgumentError` instead of
+silently inheriting Julia's ambient `setprecision` context.
 """
 function norminf end
 
 function norminf(backend::AbstractBFLABackend, x::AbstractArray{BigFloat})
-    isempty(x) && return BigFloat(0)
+    isempty(x) && throw(ArgumentError(
+        "norminf: cannot determine precision of an empty BigFloat array; " *
+        "the infinity norm of an empty array is undefined in BFLA",
+    ))
     p = _require_precision(_check_precision(x), "norminf")
     return _norminf(backend, x, p)
 end

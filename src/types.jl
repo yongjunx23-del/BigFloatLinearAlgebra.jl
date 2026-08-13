@@ -75,7 +75,10 @@ Whether the diagonal of a triangular matrix is implicit unit or stored.
 
 Return a fixed, auditable description of the operations a backend supports.
 This is a pure query; it performs no computation and is never used as an
-implicit fallback gate.
+implicit fallback gate. Fields are stable, machine-readable, and
+backend-specific; `cholesky_triangles` enumerates the authoritative triangles
+the backend can factor, because `NativeBackend` supports lower-triangular
+Cholesky only while `GenericBackend` supports both lower and upper.
 """
 function capabilities end
 
@@ -87,6 +90,7 @@ capabilities(::NativeBackend) = (
     trsv = true,
     trmm = true,
     cholesky = true,
+    cholesky_triangles = (:lower,),
     factor_solve = true,
     threading = false,
     ownership_safe = true,
@@ -100,10 +104,37 @@ capabilities(::GenericBackend) = (
     trsv = true,
     trmm = true,
     cholesky = true,
+    cholesky_triangles = (:lower, :upper),
     factor_solve = true,
     threading = false,
     ownership_safe = true,
 )
+
+"""
+    PrecisionMismatch <: Exception
+
+Thrown when a `BigFloat` operand does not carry a uniform MPFR precision. This
+includes both intra-array mismatch (one element has a different precision than
+the rest) and cross-operand mismatch. `index` is the 1-based linear index of the
+offending element for intra-array failures, or `nothing` when the mismatch is
+between whole operands.
+"""
+struct PrecisionMismatch <: Exception
+    expected::Int
+    found::Int
+    index::Union{Nothing,Int}
+end
+
+function Base.showerror(io::IO, err::PrecisionMismatch)
+    if err.index === nothing
+        print(io, "PrecisionMismatch: expected BigFloat precision ",
+              err.expected, " bits, found ", err.found, " bits")
+    else
+        print(io, "PrecisionMismatch: expected BigFloat precision ",
+              err.expected, " bits, found ", err.found,
+              " bits at linear index ", err.index)
+    end
+end
 
 """
     UnsupportedOperation
