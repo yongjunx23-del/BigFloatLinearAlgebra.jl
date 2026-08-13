@@ -22,4 +22,5 @@ include("test_utils.jl")
     include("qr.jl")
     include("quality.jl")
     include("lu.jl")
+    include("final_review_regressions.jl")
 end

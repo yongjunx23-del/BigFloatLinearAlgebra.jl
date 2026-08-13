@@ -110,3 +110,12 @@ frozen legacy path.
   inert tuning control.
 - `BFLAWorkspace` is now documented as caller-managed scratch, and ineffective
   `workspace=` kernel keywords were removed instead of being silently ignored.
+
+### Final review hardening
+
+- Complete the Bunch-Kaufman pivot decision with the intermediate keep-current
+  1x1 test, preventing a nonsingular matrix from being rejected after selecting
+  an avoidably singular 2x2 pivot block.
+- Configurable Level-3/Cholesky dispatchers preserve the standard
+  `UnsupportedOperation` contract for unregistered backends, and LDLT now
+  resolves backend support before rebuilding the inactive triangle.

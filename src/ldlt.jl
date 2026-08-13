@@ -173,10 +173,6 @@ function ldlt!(
             falses(n),
         )
     end
-    # Pivot selection needs symmetric row/column access. Rebuild the
-    # non-authoritative upper triangle from the validated lower triangle so
-    # stale or poisoned caller data can never influence the factorization.
-    mirror_triangle!(A, Lower)
     info, perm, blocks = _ldlt!(backend, A, p)
     subdiag = _subdiag_is_d(blocks, size(A, 1))
     if !_triangle_finite(A, Lower)
@@ -292,6 +288,11 @@ end
 function _ldlt!(::NativeBackend, A::AbstractMatrix{BigFloat}, p::Int)
     n = size(A, 1)
     n == 0 && return 0, Int[], Int[]
+    # Pivot selection needs symmetric row/column access. Rebuild the inactive
+    # upper triangle only after backend dispatch has resolved to a supported
+    # implementation, so an unsupported backend never mutates the caller's
+    # target before throwing.
+    mirror_triangle!(A, Lower)
     alpha = _bk_alpha(p)
     perm = collect(1:n)
     blocks = Int[]
@@ -325,6 +326,7 @@ function _ldlt!(::NativeBackend, A::AbstractMatrix{BigFloat}, p::Int)
         end
         s = 1
         MA.operate_to!(absolute_value, abs, A[k, k])
+        MA.operate_to!(a1v, copy, absolute_value)
         MA.operate_to!(threshold, *, alpha, w)
         if absolute_value < threshold
             # refined Bunch-Kaufman pivot selection
@@ -336,20 +338,30 @@ function _ldlt!(::NativeBackend, A::AbstractMatrix{BigFloat}, p::Int)
                     MA.operate_to!(rmax, copy, absolute_value)
                 end
             end
-            MA.operate_to!(absolute_value, abs, A[r, r])
-            MA.operate_to!(threshold, *, alpha, rmax)
-            if absolute_value >= threshold
-                if r != k
-                    _swap_sym!(A, k, r)
-                    perm[k], perm[r] = perm[r], perm[k]
-                end
+            # Standard Bunch-Kaufman intermediate test:
+            # |a_kk| >= alpha * colmax^2 / rowmax. Compare products at factor
+            # precision to avoid a division and ambient precision dependence.
+            MA.operate_to!(acc, *, a1v, rmax)
+            MA.operate_to!(detv, *, w, w)
+            MA.operate_to!(threshold, *, alpha, detv)
+            if acc >= threshold
                 s = 1
             else
-                if r != k + 1
-                    _swap_sym!(A, k + 1, r)
-                    perm[k + 1], perm[r] = perm[r], perm[k + 1]
+                MA.operate_to!(absolute_value, abs, A[r, r])
+                MA.operate_to!(threshold, *, alpha, rmax)
+                if absolute_value >= threshold
+                    if r != k
+                        _swap_sym!(A, k, r)
+                        perm[k], perm[r] = perm[r], perm[k]
+                    end
+                    s = 1
+                else
+                    if r != k + 1
+                        _swap_sym!(A, k + 1, r)
+                        perm[k + 1], perm[r] = perm[r], perm[k + 1]
+                    end
+                    s = 2
                 end
-                s = 2
             end
         end
 
@@ -508,6 +520,7 @@ function _ldlt!(::GenericBackend, A::AbstractMatrix{BigFloat}, p::Int)
     return _with_precision(p) do
         n = size(A, 1)
         n == 0 && return 0, Int[], Int[]
+        mirror_triangle!(A, Lower)
         alpha = (BigFloat(1) + sqrt(BigFloat(17))) / BigFloat(8)
         perm = collect(1:n)
         blocks = Int[]
@@ -531,14 +544,17 @@ function _ldlt!(::GenericBackend, A::AbstractMatrix{BigFloat}, p::Int)
                 continue
             end
             s = 1
-            if abs(A[k, k]) < alpha * w
+            absakk = abs(A[k, k])
+            if absakk < alpha * w
                 rmax = BigFloat(0)
                 for j in k:n
                     j == r && continue
                     aj = abs(A[r, j])
                     aj > rmax && (rmax = aj)
                 end
-                if abs(A[r, r]) >= alpha * rmax
+                if absakk * rmax >= alpha * w * w
+                    s = 1
+                elseif abs(A[r, r]) >= alpha * rmax
                     if r != k
                         _swap_sym!(A, k, r)
                         perm[k], perm[r] = perm[r], perm[k]
