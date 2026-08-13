@@ -1,13 +1,17 @@
 # Cholesky factorization and solve public API.
 
 """
-    cholesky!(backend, A; triangle=Lower, check=true) -> BFLACholeskyFactor
+    cholesky!(backend, A; triangle=Lower, check=true, workspace=nothing,
+              workspace_worker=1) -> BFLACholeskyFactor
 
 Factor the symmetric positive-definite matrix `A` in place and borrow its
 storage. Only the requested triangle is read and written; the other triangle is
 left untouched. On failure, `check=true` throws a `PosDefException`; with
 `check=false` a factor with a nonzero `info` is returned. A failed
-factorization may leave `A` partially overwritten.
+factorization may leave `A` partially overwritten. An explicit `workspace`
+reuses only the worker-local identity buffer used by the ownership precheck;
+its precision must match `A`, and concurrent calls must reserve distinct
+`workspace_worker` slots.
 """
 function cholesky! end
 
@@ -17,10 +21,18 @@ function cholesky!(
     triangle::Triangle=Lower,
     check::Bool=true,
     config::KernelConfig=KernelConfig(),
+    workspace::Union{Nothing,BFLAWorkspace}=nothing,
+    workspace_worker::Int=1,
 )
     _require_square(A, "cholesky!")
     _require_valid_triangle(triangle, "cholesky!")
     p = _require_precision(_check_precision(A), "cholesky!")
+    identity_buffer = _workspace_identity_buffer(
+        workspace, workspace_worker, p, "cholesky!",
+    )
+    _require_independent_triangle_elements(
+        A, triangle, "cholesky!", identity_buffer,
+    )
     if !_triangle_finite(A, triangle)
         check && throw(DomainError(
             A,
@@ -45,7 +57,8 @@ function cholesky!(
 end
 
 """
-    try_cholesky!(backend, A; triangle=Lower) -> Union{BFLACholeskyFactor,Nothing}
+    try_cholesky!(backend, A; triangle=Lower, workspace=nothing,
+                  workspace_worker=1) -> Union{BFLACholeskyFactor,Nothing}
 
 Like `cholesky!(backend, A; check=false)`, but return `nothing` instead of a
 failed factor. The factorization still mutates `A` in place.
@@ -56,13 +69,23 @@ function try_cholesky!(
     backend::AbstractBFLABackend,
     A::AbstractMatrix{BigFloat};
     triangle::Triangle=Lower,
+    workspace::Union{Nothing,BFLAWorkspace}=nothing,
+    workspace_worker::Int=1,
 )
-    F = cholesky!(backend, A; triangle=triangle, check=false)
+    F = cholesky!(
+        backend,
+        A;
+        triangle=triangle,
+        check=false,
+        workspace=workspace,
+        workspace_worker=workspace_worker,
+    )
     return issuccess(F) ? F : nothing
 end
 
 """
-    cholesky(backend, A; triangle=Lower, check=true) -> BFLACholeskyFactor
+    cholesky(backend, A; triangle=Lower, check=true, workspace=nothing,
+             workspace_worker=1) -> BFLACholeskyFactor
 
 Allocating Cholesky factorization. `A` is deep-copied first, so the returned
 factor owns its storage and the input is never modified.
@@ -75,11 +98,22 @@ function cholesky(
     triangle::Triangle=Lower,
     check::Bool=true,
     config::KernelConfig=KernelConfig(),
+    workspace::Union{Nothing,BFLAWorkspace}=nothing,
+    workspace_worker::Int=1,
 )
     _require_square(A, "cholesky")
     p = _require_precision(_check_precision(A), "cholesky")
+    _workspace_identity_buffer(workspace, workspace_worker, p, "cholesky")
     B = owned_copy(A; precision_bits=p)
-    return cholesky!(backend, B; triangle=triangle, check=check, config=config)
+    return cholesky!(
+        backend,
+        B;
+        triangle=triangle,
+        check=check,
+        config=config,
+        workspace=workspace,
+        workspace_worker=workspace_worker,
+    )
 end
 
 # Unpack a factor and dispatch the solve through its recorded backend.
@@ -101,12 +135,7 @@ function ldiv!(F::BFLACholeskyFactor, rhs::AbstractVecOrMat{BigFloat})
     n = size(F.factors, 1)
     size(rhs, 1) == n ||
         throw(DimensionMismatch("ldiv!: right-hand side dimensions differ"))
-    p_actual = _require_precision(_check_precision(F.factors, rhs), "ldiv!")
-    # The factor handle records the precision it was produced at. The backing
-    # matrix is mutable, so re-verify actual storage matches the recorded
-    # precision instead of trusting factor-creation-time metadata.
-    p_actual == F.precision_bits ||
-        throw(PrecisionMismatch(F.precision_bits, p_actual, nothing))
+    _validate_factor_precision(F, "ldiv!", rhs)
     _require_no_alias(rhs, F.factors, "ldiv!")
     _triangle_finite(F.factors, F.triangle) || throw(DomainError(
         F.factors,

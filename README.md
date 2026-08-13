@@ -23,6 +23,13 @@ cone, certificate, LP, SDP).
   `setprecision`. Mixed-precision operands fail closed.
 - **No silent fallback.** A backend either supports an operation or throws
   `UnsupportedOperation`. Failures are never faked as success.
+- **Stable factor protocol.** Cholesky, LDLT, RRQR, and LU expose common
+  backend/precision/status/failure/diagnostic accessors, so consumers do not
+  inspect concrete factor fields.
+- **Explicit optional workspace.** Cholesky can reuse a caller-owned,
+  precision-matched worker slot for its ownership scan. This changes neither
+  backend nor numerical trajectory; other kernels do not accept an ignored
+  workspace keyword.
 
 See [docs/src](docs/src) for the frozen backend/ownership/precision contracts.
 
@@ -63,8 +70,10 @@ solve!(factor, b)
 - Level 2: `gemv!`, `trsv!`, `syr!`, `symv!`.
 - Level 3: `gemm!`, `syrk!`, `gemmt!`, `syr2k!`, `trmm!`, `trsm!`.
 - Cholesky: `try_cholesky!`, `cholesky!`, `cholesky`, `ldiv!`, `solve!`,
-  `solve`, `factor_matrix`, `factor_backend`, `factor_triangle`,
-  `factor_precision`, `factor_status`, `issuccess`.
+  `solve`.
+- Common factor metadata: `factor_matrix`, `factor_backend`,
+  `factor_precision`, `factor_status`, `factor_kind`, `factor_triangle`,
+  `factor_failure_position`, `factor_diagnostics`, `issuccess`.
 - LDLT: `try_ldlt!`, `ldlt!`, `ldlt`, pivot/inertia diagnostics, and solve.
 - QR: `qr!`, `qr`, `applyQ!`, rank/permutation/R-diagonal diagnostics, and
   overdetermined solve.
@@ -82,7 +91,7 @@ Only real `BigFloat` is supported in this phase.
 | --- | --- | --- |
 | GEMM/GEMV/SYRK | yes | yes |
 | TRSM/TRSV/TRMM | yes | yes |
-| Cholesky | lower only | lower and upper |
+| Cholesky | lower only; explicit workspace | lower and upper; explicit workspace |
 | LDLT / RRQR / LU | yes | yes |
 | residual / backward error | yes | yes |
 | higher-precision residual / refinement | yes | yes |
@@ -98,15 +107,20 @@ inside a scoped, lock-guarded precision context.
 ## Testing and benchmarking
 
 ```julia
-julia --project=. test/runtests.jl
-julia --project=. benchmark/run_kernels.jl
+julia --project=. -t 1 test/runtests.jl
+julia --project=. -t 4 test/runtests.jl
+julia --project=. benchmark/run_production_cycles.jl
+julia --project=. benchmark/run_standalone.jl
 ```
 
 The unit suite covers ownership, numerical correctness (Native vs. Generic vs.
 a `2p`-bit oracle), factorizations, residual/refinement, failure semantics,
-precision, and concurrency. The benchmark runner reports median/IQR/min/max and allocations
-after a correctness gate, and `benchmark/compare_sdpx_legacy.jl` is an opt-in
-SDPX parity check.
+precision, and concurrency. Benchmark runners report cold/warm timing,
+median/IQR/min/max, allocations, effective threads, block size, and RSS only
+after correctness gates. `benchmark/compare_sdpx_legacy.jl` and
+`benchmark/compare_sdpx_legacy_timing.jl` are opt-in parity/A-B checks; SDPX is
+never a required test dependency. A representative local report is in
+[`benchmark/results/2026-08-13-round-c.md`](benchmark/results/2026-08-13-round-c.md).
 
 ## License
 

@@ -55,6 +55,26 @@ end
 
 @inline _require_precision(p::Int, ::AbstractString) = p
 
+_factor_precision_operands(::AbstractBFLAFactor) = ()
+
+# Re-check mutable factor storage at every use boundary. Factor-specific
+# finite/authority rules remain in each solve implementation.
+function _validate_factor_precision(
+    F::AbstractBFLAFactor,
+    operation::AbstractString,
+    operands...,
+)
+    actual = _require_precision(
+        _check_precision(
+            factor_matrix(F), _factor_precision_operands(F)..., operands...,
+        ),
+        operation,
+    )
+    recorded = factor_precision(F)
+    actual == recorded || throw(PrecisionMismatch(recorded, actual, nothing))
+    return actual
+end
+
 """
     _require_square(A, op)
 

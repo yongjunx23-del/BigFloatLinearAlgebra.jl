@@ -104,3 +104,35 @@ end
     )
     return output
 end
+
+"""
+    _mpfr_set_ui_2exp!(output, significand, exponent)
+
+Set `output = significand * 2^exponent`, rounded directly into `output`'s
+precision. This wrapper is used for exact binary scale constants whose
+construction must not inherit ambient `setprecision`.
+"""
+@inline function _mpfr_set_ui_2exp!(
+    output::BigFloat,
+    significand::Integer,
+    exponent::Integer,
+)
+    significand >= 0 || throw(ArgumentError(
+        "_mpfr_set_ui_2exp!: significand must be nonnegative",
+    ))
+    ccall(
+        (:mpfr_set_ui_2exp, Base.MPFR.libmpfr),
+        Cint,
+        (
+            Ref{BigFloat},
+            Culong,
+            Clong,
+            Base.MPFR.MPFRRoundingMode,
+        ),
+        output,
+        Culong(significand),
+        Clong(exponent),
+        Base.MPFR.rounding_raw(BigFloat),
+    )
+    return output
+end

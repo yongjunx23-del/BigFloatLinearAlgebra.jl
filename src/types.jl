@@ -79,6 +79,8 @@ implicit fallback gate. Fields are stable, machine-readable, and
 backend-specific; `cholesky_triangles` enumerates the authoritative triangles
 the backend can factor, because `NativeBackend` supports lower-triangular
 Cholesky only while `GenericBackend` supports both lower and upper.
+`cholesky_workspace` reports support for the explicit ownership-scan workspace
+contract; it never implies an alternate numerical kernel or fallback.
 """
 function capabilities end
 
@@ -94,8 +96,13 @@ capabilities(::NativeBackend) = (
     trmm = true,
     cholesky = true,
     cholesky_triangles = (Lower,),
+    cholesky_workspace = true,
     ldlt = true,
+    unpivoted_qr = false,
     rank_revealing_qr = true,
+    qr_pivoting = :column,
+    least_squares_solve = true,
+    vector_solve = true,
     lu = true,
     multi_rhs = true,
     residual = true,
@@ -120,8 +127,13 @@ capabilities(::GenericBackend) = (
     trmm = true,
     cholesky = true,
     cholesky_triangles = (Lower, Upper),
+    cholesky_workspace = true,
     ldlt = true,
+    unpivoted_qr = false,
     rank_revealing_qr = true,
+    qr_pivoting = :column,
+    least_squares_solve = true,
+    vector_solve = true,
     lu = true,
     multi_rhs = true,
     residual = true,
@@ -247,9 +259,10 @@ Return the backend that produced `F`.
 factor_backend(F::BFLACholeskyFactor) = F.backend
 
 """
-    factor_triangle(F) -> Triangle
+    factor_triangle(F) -> Union{Triangle,Nothing}
 
-Return the authoritative triangle of `F`.
+Return the authoritative triangle of `F`, or `nothing` when the factorization
+does not use triangular authority semantics.
 """
 factor_triangle(F::BFLACholeskyFactor) = F.triangle
 
@@ -271,6 +284,15 @@ failure pivot in `position`; a non-finite authoritative triangle yields
 factor_status(F::BFLACholeskyFactor) = F.status
 
 """
+    factor_failure_position(F) -> Union{Nothing,Int}
+
+Return the optional 1-based failure position recorded by the factorization.
+Callers should use this accessor instead of reading the concrete
+[`FactorStatus`](@ref) field layout.
+"""
+factor_failure_position(F::AbstractBFLAFactor) = factor_status(F).position
+
+"""
     factor_kind(F) -> Symbol
 
 Kind of factorization (`:cholesky`, `:ldlt`, `:qr`, `:lu`, ...).
@@ -283,6 +305,60 @@ factor_kind(::BFLACholeskyFactor) = :cholesky
 Whether the factorization succeeded.
 """
 issuccess(F::BFLACholeskyFactor) = F.status.kind === :success
+
+@inline function _factor_abs_to!(destination::BigFloat, source::BigFloat)
+    MA.operate_to!(destination, copy, source)
+    signbit(destination) && MA.operate!(-, destination)
+    return destination
+end
+
+function _cholesky_diagonal_diagnostics(F::BFLACholeskyFactor)
+    _validate_factor_precision(F, "factor_diagnostics")
+    _triangle_finite(F.factors, F.triangle) || throw(DomainError(
+        F.factors,
+        "factor_diagnostics: authoritative Cholesky triangle contains " *
+        "non-finite entries",
+    ))
+    n = size(F.factors, 1)
+    n == 0 && return (nothing, nothing, nothing)
+    p = F.precision_bits
+    absolute = BigFloat(0; precision = p)
+    minimum_diagonal = nothing
+    maximum_diagonal = nothing
+    @inbounds for i in 1:n
+        _factor_abs_to!(absolute, F.factors[i, i])
+        if minimum_diagonal === nothing || absolute < minimum_diagonal
+            minimum_diagonal = MA.mutable_copy(absolute)
+        end
+        if maximum_diagonal === nothing || absolute > maximum_diagonal
+            maximum_diagonal = MA.mutable_copy(absolute)
+        end
+    end
+    ratio = BigFloat(0; precision = p)
+    if !iszero(maximum_diagonal)
+        _mpfr_div!(ratio, minimum_diagonal, maximum_diagonal)
+    end
+    return minimum_diagonal, maximum_diagonal, ratio
+end
+
+"""
+    factor_diagnostics(F::BFLACholeskyFactor) -> NamedTuple
+
+Return machine-readable Cholesky facts. These fields describe the factor and
+its status; they do not encode an acceptance or fallback policy.
+"""
+function factor_diagnostics(F::BFLACholeskyFactor)
+    minimum_diagonal, maximum_diagonal, ratio = issuccess(F) ?
+        _cholesky_diagonal_diagnostics(F) : (nothing, nothing, nothing)
+    return (
+        factor_kind = factor_kind(F),
+        triangle = factor_triangle(F),
+        failure_position = factor_failure_position(F),
+        min_abs_diagonal = minimum_diagonal,
+        max_abs_diagonal = maximum_diagonal,
+        diagonal_ratio = ratio,
+    )
+end
 
 Base.size(F::BFLACholeskyFactor) = size(F.factors)
 Base.size(F::BFLACholeskyFactor, dimension::Integer) =

@@ -61,6 +61,12 @@
                 @test issuccess(F)
                 @test factor_inertia(F) == (1, 1, 0)
                 @test factor_diagnostics(F).pivot_2x2_count == 1
+                diagnostics = factor_diagnostics(F)
+                @test diagnostics.min_abs_1x1_pivot === nothing
+                @test diagnostics.min_abs_2x2_determinant ==
+                      BigFloat(1; precision = p)
+                @test diagnostics.min_normalized_2x2_quality ==
+                      BigFloat(1; precision = p)
                 @test setprecision(BigFloat, 32) do
                     factor_inertia(F) == (1, 1, 0)
                 end
@@ -73,6 +79,65 @@
                 r = BFLA.owned_zeros(BigFloat, 2; precision_bits = p)
                 BFLA.residual!(Native, A, b, b0, r)
                 @test BFLA.norminf(Native, r) <= BigFloat(10; precision = p) * eps_bits(p)
+            end
+
+            @testset "pivot quality diagnostics" begin
+                diagonal = BFLA.owned_zeros(
+                    BigFloat, 3, 3; precision_bits = p,
+                )
+                diagonal[1, 1] = BigFloat(-3; precision = p)
+                diagonal[2, 2] = BigFloat(1 // 8; precision = p)
+                diagonal[3, 3] = BigFloat(5; precision = p)
+                F = BFLA.ldlt(Native, diagonal)
+                diagnostics = factor_diagnostics(F)
+                @test diagnostics.factor_kind === :ldlt
+                @test diagnostics.inertia == (2, 1, 0)
+                @test diagnostics.min_abs_1x1_pivot ==
+                      BigFloat(1 // 8; precision = p)
+                @test diagnostics.min_abs_2x2_determinant === nothing
+                @test diagnostics.min_normalized_2x2_quality === nothing
+                BFLA.MA.operate!(zero, diagnostics.min_abs_1x1_pivot)
+                @test factor_diagnostics(F).min_abs_1x1_pivot ==
+                      BigFloat(1 // 8; precision = p)
+
+                nearly_singular = BFLA.owned_zeros(
+                    BigFloat, 2, 2; precision_bits = p,
+                )
+                tiny = BigFloat(0; precision = p)
+                BFLA._mpfr_set_ui_2exp!(tiny, 1, -div(p, 2))
+                nearly_singular[1, 1] = BigFloat(0; precision = p)
+                nearly_singular[2, 1] = BigFloat(1; precision = p)
+                nearly_singular[2, 2] = tiny
+                near_factor = BFLA.ldlt(Native, nearly_singular)
+                near_diagnostics = factor_diagnostics(near_factor)
+                @test near_diagnostics.min_abs_2x2_determinant ==
+                      BigFloat(1; precision = p)
+                @test near_diagnostics.min_normalized_2x2_quality ==
+                      BigFloat(1; precision = p)
+
+                # Exercise the normalized determinant definition directly on
+                # a valid packed 2x2 D block near cancellation. Standard BK
+                # pivoting normally avoids selecting such a weak block.
+                packed = BFLA.owned_zeros(
+                    BigFloat, 2, 2; precision_bits = p,
+                )
+                packed[1, 1] = BigFloat(1; precision = p)
+                packed[2, 1] = BigFloat(1; precision = p)
+                BFLA.MA.operate_to!(packed[2, 2], +,
+                    BigFloat(1; precision = p), tiny)
+                packed_factor = BFLA.BFLALDLTFactor(
+                    packed,
+                    Native,
+                    p,
+                    BFLA.FactorStatus(:success, nothing),
+                    [1, 2],
+                    [2],
+                    BitVector((false, true)),
+                )
+                packed_diagnostics = factor_diagnostics(packed_factor)
+                @test packed_diagnostics.min_abs_2x2_determinant == tiny
+                @test packed_diagnostics.min_normalized_2x2_quality > 0
+                @test packed_diagnostics.min_normalized_2x2_quality < tiny
             end
 
             @testset "factorization ignores ambient precision" begin

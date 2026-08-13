@@ -33,6 +33,7 @@ factor_backend(F::BFLALDLTFactor) = F.backend
 factor_precision(F::BFLALDLTFactor) = F.precision_bits
 factor_status(F::BFLALDLTFactor) = F.status
 factor_kind(::BFLALDLTFactor) = :ldlt
+factor_triangle(::BFLALDLTFactor) = Lower
 issuccess(F::BFLALDLTFactor) = F.status.kind === :success
 
 """
@@ -111,6 +112,64 @@ function factor_inertia(F::BFLALDLTFactor)
     return (npos, nneg, nzero)
 end
 
+function _ldlt_pivot_diagnostics(F::BFLALDLTFactor)
+    _validate_factor_precision(F, "factor_diagnostics")
+    _triangle_finite(F.factors, Lower) || throw(DomainError(
+        F.factors,
+        "factor_diagnostics: authoritative LDLT triangle contains " *
+        "non-finite entries",
+    ))
+    p = F.precision_bits
+    A = F.factors
+    absolute = BigFloat(0; precision = p)
+    product = BigFloat(0; precision = p)
+    square = BigFloat(0; precision = p)
+    determinant = BigFloat(0; precision = p)
+    scale = BigFloat(0; precision = p)
+    denominator = BigFloat(0; precision = p)
+    quality = BigFloat(0; precision = p)
+    minimum_1x1 = nothing
+    minimum_2x2_determinant = nothing
+    minimum_2x2_quality = nothing
+    k = 1
+    @inbounds for block_size in F.blocks
+        if block_size == 1
+            _factor_abs_to!(absolute, A[k, k])
+            if minimum_1x1 === nothing || absolute < minimum_1x1
+                minimum_1x1 = MA.mutable_copy(absolute)
+            end
+            k += 1
+            continue
+        end
+
+        MA.operate_to!(product, *, A[k, k], A[k + 1, k + 1])
+        MA.operate_to!(square, *, A[k + 1, k], A[k + 1, k])
+        MA.operate_to!(determinant, -, product, square)
+        _factor_abs_to!(absolute, determinant)
+        if minimum_2x2_determinant === nothing ||
+           absolute < minimum_2x2_determinant
+            minimum_2x2_determinant = MA.mutable_copy(absolute)
+        end
+
+        MA.operate!(zero, scale)
+        for value in (A[k, k], A[k + 1, k], A[k + 1, k + 1])
+            _factor_abs_to!(determinant, value)
+            determinant > scale && MA.operate_to!(scale, copy, determinant)
+        end
+        MA.operate_to!(denominator, *, scale, scale)
+        if iszero(denominator)
+            MA.operate!(zero, quality)
+        else
+            _mpfr_div!(quality, absolute, denominator)
+        end
+        if minimum_2x2_quality === nothing || quality < minimum_2x2_quality
+            minimum_2x2_quality = MA.mutable_copy(quality)
+        end
+        k += 2
+    end
+    return minimum_1x1, minimum_2x2_determinant, minimum_2x2_quality
+end
+
 """
     factor_diagnostics(F) -> NamedTuple
 
@@ -122,11 +181,18 @@ function factor_diagnostics(F::BFLALDLTFactor)
     inertia = issuccess(F) ? factor_inertia(F) : nothing
     n1 = count(==(1), F.blocks)
     n2 = count(==(2), F.blocks)
+    minimum_1x1, minimum_2x2_determinant, minimum_2x2_quality =
+        issuccess(F) ? _ldlt_pivot_diagnostics(F) :
+        (nothing, nothing, nothing)
     return (
+        factor_kind = factor_kind(F),
         inertia = inertia,
         pivot_1x1_count = n1,
         pivot_2x2_count = n2,
-        failure_position = F.status.position,
+        failure_position = factor_failure_position(F),
+        min_abs_1x1_pivot = minimum_1x1,
+        min_abs_2x2_determinant = minimum_2x2_determinant,
+        min_normalized_2x2_quality = minimum_2x2_quality,
     )
 end
 
@@ -241,9 +307,7 @@ function ldiv!(F::BFLALDLTFactor, rhs::AbstractVecOrMat{BigFloat})
     n = size(F.factors, 1)
     size(rhs, 1) == n || throw(DimensionMismatch("ldiv!: right-hand side dimensions differ"))
     _require_no_alias(rhs, F.factors, "ldiv!")
-    p_actual = _require_precision(_check_precision(F.factors, rhs), "ldiv!")
-    p_actual == F.precision_bits ||
-        throw(PrecisionMismatch(F.precision_bits, p_actual, nothing))
+    _validate_factor_precision(F, "ldiv!", rhs)
     _triangle_finite(F.factors, Lower) || throw(DomainError(
         F.factors,
         "ldiv!: authoritative factor triangle contains non-finite entries",

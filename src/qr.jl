@@ -18,14 +18,64 @@ struct BFLAQRFactor{M<:AbstractMatrix{BigFloat},B<:AbstractBFLABackend} <: Abstr
     tau::Vector{BigFloat}
     jpvt::Vector{Int}
     rank::Int
+    # `tolerance` is the 0.1.0 spelling and remains an absolute tolerance
+    # alias for callers that still inspect the old field.  The explicit
+    # fields below are the authoritative RRQR rank policy metadata.
     tolerance::BigFloat
+    atol::BigFloat
+    rtol::BigFloat
+    reference_scale::BigFloat
+    effective_threshold::BigFloat
+end
+
+_factor_precision_operands(F::BFLAQRFactor) = (
+    F.tau,
+    F.tolerance,
+    F.atol,
+    F.rtol,
+    F.reference_scale,
+    F.effective_threshold,
+)
+
+# Keep the 0.1.0 positional constructor usable by existing callers and by
+# factors serialized by that release.  Such a factor has absolute-only rank
+# metadata, which is exactly the old `tol` policy.
+function BFLAQRFactor(
+    factors::M,
+    backend::B,
+    precision_bits::Int,
+    status::FactorStatus,
+    tau::Vector{BigFloat},
+    jpvt::Vector{Int},
+    rank::Int,
+    tolerance::BigFloat,
+) where {M<:AbstractMatrix{BigFloat},B<:AbstractBFLABackend}
+    atol = MA.mutable_copy(tolerance)
+    rtol = BigFloat(0; precision = precision_bits)
+    reference_scale = BigFloat(0; precision = precision_bits)
+    effective_threshold = MA.mutable_copy(tolerance)
+    return BFLAQRFactor(
+        factors,
+        backend,
+        precision_bits,
+        status,
+        tau,
+        jpvt,
+        rank,
+        MA.mutable_copy(tolerance),
+        atol,
+        rtol,
+        reference_scale,
+        effective_threshold,
+    )
 end
 
 factor_matrix(F::BFLAQRFactor) = F.factors
 factor_backend(F::BFLAQRFactor) = F.backend
 factor_precision(F::BFLAQRFactor) = F.precision_bits
 factor_status(F::BFLAQRFactor) = F.status
-factor_kind(::BFLAQRFactor) = :qr
+factor_kind(::BFLAQRFactor) = :rrqr
+factor_triangle(::BFLAQRFactor) = nothing
 issuccess(F::BFLAQRFactor) = F.status.kind === :success
 
 """
@@ -56,6 +106,199 @@ end
 
 factor_tolerance(F::BFLAQRFactor) = MA.mutable_copy(F.tolerance)
 
+"""
+    factor_rank_atol(F) -> BigFloat
+
+Return the absolute component of the RRQR numerical-rank policy.  The result
+is a defensive copy.
+"""
+factor_rank_atol(F::BFLAQRFactor) = MA.mutable_copy(F.atol)
+
+"""
+    factor_rank_rtol(F) -> BigFloat
+
+Return the relative component of the RRQR numerical-rank policy.  The result
+is a defensive copy.
+"""
+factor_rank_rtol(F::BFLAQRFactor) = MA.mutable_copy(F.rtol)
+
+"""
+    factor_rank_scale(F) -> BigFloat
+
+Return the scale used as the reference for the relative rank threshold.  For
+RRQR this is the largest input-column 2-norm, computed before the packed
+factor storage is overwritten.  The result is a defensive copy.
+"""
+factor_rank_scale(F::BFLAQRFactor) = MA.mutable_copy(F.reference_scale)
+
+"""
+    factor_rank_threshold(F) -> BigFloat
+
+    Return `max(atol, rtol * reference_scale)`, the threshold used by the stored
+RRQR rank decision.  The result is a defensive copy.
+"""
+factor_rank_threshold(F::BFLAQRFactor) = MA.mutable_copy(F.effective_threshold)
+
+"""
+    factor_diagnostics(F::BFLAQRFactor) -> NamedTuple
+
+Return RRQR rank-policy metadata.  Mutable numeric values and the pivot vector
+are copied so inspecting diagnostics cannot mutate the factor.
+"""
+function factor_diagnostics(F::BFLAQRFactor)
+    _validate_factor_precision(F, "factor_diagnostics")
+    (_all_finite(F.factors) && _all_finite(F.tau) &&
+     isfinite(F.tolerance) && isfinite(F.atol) && isfinite(F.rtol) &&
+     isfinite(F.reference_scale) && isfinite(F.effective_threshold)) ||
+        throw(DomainError(
+            F, "factor_diagnostics: RRQR storage contains non-finite entries",
+        ))
+    diagonal = factor_Rdiag(F)
+    minimum_accepted = nothing
+    absolute = BigFloat(0; precision = F.precision_bits)
+    for i in 1:F.rank
+        _factor_abs_to!(absolute, diagonal[i])
+        if minimum_accepted === nothing || absolute < minimum_accepted
+            minimum_accepted = MA.mutable_copy(absolute)
+        end
+    end
+    next_rejected = if F.rank < length(diagonal)
+        _factor_abs_to!(absolute, diagonal[F.rank + 1])
+        MA.mutable_copy(absolute)
+    else
+        nothing
+    end
+    return (
+        factor_kind = factor_kind(F),
+        rank = factor_rank(F),
+        atol = factor_rank_atol(F),
+        rtol = factor_rank_rtol(F),
+        reference_scale = factor_rank_scale(F),
+        effective_threshold = factor_rank_threshold(F),
+        R_diagonal = diagonal,
+        min_accepted_abs_Rdiag = minimum_accepted,
+        next_rejected_abs_Rdiag = next_rejected,
+        permutation = factor_jpvt(F),
+        failure_position = factor_failure_position(F),
+    )
+end
+
+function _qr_validate_tolerance(
+    value::BigFloat,
+    name::AbstractString,
+    operation::AbstractString,
+)
+    isfinite(value) || throw(DomainError(
+        value, "$operation: $name must be finite",
+    ))
+    value >= 0 || throw(DomainError(
+        value, "$operation: $name must be nonnegative",
+    ))
+    return nothing
+end
+
+function _qr_default_rtol(p::Int, m::Int, n::Int)
+    # The dimension factor is the usual backward-error guard. Construct every
+    # quantity directly at factor precision, independent of ambient precision.
+    epsilon = BigFloat(0; precision = p)
+    _mpfr_set_ui_2exp!(epsilon, 1, 1 - p)
+    result = BigFloat(0; precision = p)
+    MA.operate_to!(result, *, BigFloat(max(m, n); precision = p), epsilon)
+    return result
+end
+
+function _qr_reference_scale(A::AbstractMatrix{BigFloat}, p::Int)
+    scale = BigFloat(0; precision = p)
+    acc = BigFloat(0; precision = p)
+    buf = BigFloat(0; precision = p)
+    colnorm = BigFloat(0; precision = p)
+    @inbounds for j in axes(A, 2)
+        MA.operate!(zero, acc)
+        for i in axes(A, 1)
+            MA.buffered_operate!(buf, MA.add_mul, acc, A[i, j], A[i, j])
+        end
+        _mpfr_sqrt!(colnorm, acc)
+        colnorm > scale && MA.operate_to!(scale, copy, colnorm)
+    end
+    return scale
+end
+
+function _qr_rank_from_factors(A::AbstractMatrix{BigFloat}, threshold::BigFloat)
+    rank = 0
+    absolute = BigFloat(0; precision = precision(threshold))
+    @inbounds for i in 1:min(size(A, 1), size(A, 2))
+        MA.operate_to!(absolute, copy, A[i, i])
+        signbit(absolute) && MA.operate!(-, absolute)
+        absolute > threshold || break
+        rank += 1
+    end
+    return rank
+end
+
+function _qr_rank_policy(
+    A::AbstractMatrix{BigFloat},
+    p::Int,
+    tol::Union{Nothing,BigFloat},
+    atol::Union{Nothing,BigFloat},
+    rtol::Union{Nothing,BigFloat},
+    operation::AbstractString,
+)
+    tol === nothing || (atol === nothing && rtol === nothing) ||
+        throw(ArgumentError(
+            "$operation: legacy tol cannot be combined with atol or rtol",
+        ))
+    if tol === nothing
+        absolute = atol === nothing ? BigFloat(0; precision = p) : MA.mutable_copy(atol)
+        relative = rtol === nothing ?
+            _qr_default_rtol(p, size(A, 1), size(A, 2)) : MA.mutable_copy(rtol)
+    else
+        absolute = MA.mutable_copy(tol)
+        relative = BigFloat(0; precision = p)
+    end
+    _qr_validate_tolerance(absolute, "atol", operation)
+    _qr_validate_tolerance(relative, "rtol", operation)
+    scale = _qr_reference_scale(A, p)
+    threshold = BigFloat(0; precision = p)
+    MA.operate_to!(threshold, *, relative, scale)
+    threshold > absolute || MA.operate_to!(threshold, copy, absolute)
+    return absolute, relative, scale, threshold
+end
+
+"""
+    numerical_rank(F; atol=nothing, rtol=nothing) -> Int
+
+Re-evaluate the RRQR numerical rank using the factor's recorded reference
+scale.  Omitted tolerances reuse the factorization policy.  The factor's
+packed storage and metadata are validated before reading them.
+"""
+function numerical_rank(
+    F::BFLAQRFactor;
+    atol::Union{Nothing,BigFloat}=nothing,
+    rtol::Union{Nothing,BigFloat}=nothing,
+)
+    _validate_factor_precision(
+        F,
+        "numerical_rank",
+        atol,
+        rtol,
+    )
+    issuccess(F) || throw(ArgumentError(
+        "numerical_rank: factor status is not successful",
+    ))
+    (_all_finite(F.factors) && _all_finite(F.tau) &&
+     isfinite(F.tolerance) && isfinite(F.atol) && isfinite(F.rtol) &&
+     isfinite(F.reference_scale) && isfinite(F.effective_threshold)) ||
+        throw(DomainError(F, "numerical_rank: factor storage contains non-finite entries"))
+    a = atol === nothing ? F.atol : MA.mutable_copy(atol)
+    r = rtol === nothing ? F.rtol : MA.mutable_copy(rtol)
+    _qr_validate_tolerance(a, "atol", "numerical_rank")
+    _qr_validate_tolerance(r, "rtol", "numerical_rank")
+    threshold = BigFloat(0; precision = F.precision_bits)
+    MA.operate_to!(threshold, *, r, F.reference_scale)
+    threshold > a || MA.operate_to!(threshold, copy, a)
+    return _qr_rank_from_factors(F.factors, threshold)
+end
+
 Base.size(F::BFLAQRFactor) = size(F.factors)
 Base.size(F::BFLAQRFactor, dimension::Integer) = size(F.factors, dimension)
 Base.eltype(::BFLAQRFactor{M,B}) where {M,B} = BigFloat
@@ -63,38 +306,75 @@ Base.eltype(::BFLAQRFactor{M,B}) where {M,B} = BigFloat
 # --- public API ---------------------------------------------------------
 
 """
-    qr!(backend, A; tol=nothing) -> BFLAQRFactor
+    qr!(backend, A; tol=nothing, atol=nothing, rtol=nothing) -> BFLAQRFactor
 
-Rank-revealing column-pivoted QR factorization of `A` in place. `tol` is the
-absolute tolerance on the `R` diagonal used to determine the numerical rank;
-`nothing` is equivalent to an exact-zero tolerance.
+Rank-revealing column-pivoted QR factorization of `A` in place. The numerical
+rank threshold is `max(atol, rtol * reference_scale)`, where
+`reference_scale` is the largest input-column 2-norm. By default `atol` is zero
+and `rtol` is `max(size(A)...)*eps(BigFloat)` at factor precision. The legacy
+`tol` keyword remains an absolute-only mode and cannot be combined with
+`atol` or `rtol`.
 """
 function qr! end
 
-function qr!(backend::AbstractBFLABackend, A::AbstractMatrix{BigFloat}; tol::Union{Nothing,BigFloat}=nothing)
-    p = _require_precision(_check_precision(A, tol), "qr!")
+function qr!(
+    backend::AbstractBFLABackend,
+    A::AbstractMatrix{BigFloat};
+    tol::Union{Nothing,BigFloat}=nothing,
+    atol::Union{Nothing,BigFloat}=nothing,
+    rtol::Union{Nothing,BigFloat}=nothing,
+)
+    p = _require_precision(_check_precision(A, tol, atol, rtol), "qr!")
     _all_finite(A) || throw(DomainError(A, "qr!: input contains non-finite entries"))
-    m, n = size(A)
-    tolval = tol === nothing ? BigFloat(0; precision = p) : MA.mutable_copy(tol)
-    isfinite(tolval) || throw(DomainError(tolval, "qr!: tolerance must be finite"))
-    tolval >= 0 || throw(DomainError(tolval, "qr!: tolerance must be nonnegative"))
-    tau, jpvt, rank = _qr!(backend, A, p, tolval)
+    absolute, relative, scale, threshold = _qr_rank_policy(
+        A, p, tol, atol, rtol, "qr!",
+    )
+    # Factor every numerically nonzero pivot. Rank policy is evaluated only
+    # after the packed R exists, so callers may re-evaluate it later.
+    zero_threshold = BigFloat(0; precision = p)
+    tau, jpvt, _ = _qr!(backend, A, p, zero_threshold)
     (_all_finite(A) && _all_finite(tau)) || throw(DomainError(
         A, "qr!: factorization produced non-finite entries",
     ))
-    return BFLAQRFactor(A, backend, p, SUCCESS_STATUS, tau, jpvt, rank, tolval)
+    rank = _qr_rank_from_factors(A, threshold)
+    return BFLAQRFactor(
+        A,
+        backend,
+        p,
+        SUCCESS_STATUS,
+        tau,
+        jpvt,
+        rank,
+        MA.mutable_copy(absolute),
+        absolute,
+        relative,
+        scale,
+        threshold,
+    )
 end
 
 """
-    qr(backend, A; tol=nothing) -> BFLAQRFactor
+    qr(backend, A; tol=nothing, atol=nothing, rtol=nothing) -> BFLAQRFactor
 
 Allocating column-pivoted QR factorization.
 """
 function qr end
 
-function qr(backend::AbstractBFLABackend, A::AbstractMatrix{BigFloat}; tol::Union{Nothing,BigFloat}=nothing)
-    p = _require_precision(_check_precision(A), "qr")
-    return qr!(backend, owned_copy(A; precision_bits=p); tol=tol)
+function qr(
+    backend::AbstractBFLABackend,
+    A::AbstractMatrix{BigFloat};
+    tol::Union{Nothing,BigFloat}=nothing,
+    atol::Union{Nothing,BigFloat}=nothing,
+    rtol::Union{Nothing,BigFloat}=nothing,
+)
+    p = _require_precision(_check_precision(A, tol, atol, rtol), "qr")
+    return qr!(
+        backend,
+        owned_copy(A; precision_bits=p);
+        tol=tol,
+        atol=atol,
+        rtol=rtol,
+    )
 end
 
 """
@@ -104,17 +384,18 @@ Apply `Q` (`NoTrans`) or `Qᵀ` (`Trans`) on the left, overwriting `B`
 (an `m × k` matrix, where `m = size(F, 1)`).
 """
 function applyQ!(F::BFLAQRFactor, B::AbstractVecOrMat{BigFloat}, trans::TransposeOp=NoTrans)
+    issuccess(F) || throw(ArgumentError(
+        "applyQ!: QR factor status is not successful",
+    ))
     size(B, 1) == size(F.factors, 1) ||
         throw(DimensionMismatch("applyQ!: leading dimension differs"))
     _require_valid_transpose(trans, "applyQ!")
     _require_no_alias(B, F.factors, "applyQ!")
-    p_actual = _require_precision(
-        _check_precision(F.factors, F.tau, F.tolerance, B), "applyQ!",
-    )
-    p_actual == F.precision_bits ||
-        throw(PrecisionMismatch(F.precision_bits, p_actual, nothing))
+    _validate_factor_precision(F, "applyQ!", B)
     (_all_finite(F.factors) && _all_finite(F.tau) &&
-     isfinite(F.tolerance)) || throw(DomainError(
+     isfinite(F.tolerance) && isfinite(F.atol) && isfinite(F.rtol) &&
+     isfinite(F.reference_scale) && isfinite(F.effective_threshold)) ||
+        throw(DomainError(
         F, "applyQ!: factor storage contains non-finite entries",
     ))
     _all_finite(B) || throw(DomainError(
@@ -176,18 +457,20 @@ function _apply_q_common!(
 end
 
 function ldiv!(F::BFLAQRFactor, rhs::AbstractVecOrMat{BigFloat})
+    issuccess(F) || throw(ArgumentError(
+        "ldiv!: QR factor status is not successful",
+    ))
     m, n = size(F.factors)
     size(rhs, 1) == m || throw(DimensionMismatch("ldiv!: right-hand side rows differ"))
     m >= n || throw(DimensionMismatch(
         "ldiv!: in-place QR solve requires rows >= columns",
     ))
     _require_no_alias(rhs, F.factors, "ldiv!")
-    p_actual = _require_precision(
-        _check_precision(F.factors, F.tau, F.tolerance, rhs), "ldiv!",
-    )
-    p_actual == F.precision_bits || throw(PrecisionMismatch(F.precision_bits, p_actual, nothing))
+    _validate_factor_precision(F, "ldiv!", rhs)
     (_all_finite(F.factors) && _all_finite(F.tau) &&
-     isfinite(F.tolerance)) || throw(DomainError(
+     isfinite(F.tolerance) && isfinite(F.atol) && isfinite(F.rtol) &&
+     isfinite(F.reference_scale) && isfinite(F.effective_threshold)) ||
+        throw(DomainError(
         F, "ldiv!: factor storage contains non-finite entries",
     ))
     _all_finite(rhs) || throw(DomainError(

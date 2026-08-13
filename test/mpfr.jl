@@ -21,5 +21,18 @@
         @test half == setprecision(BigFloat, p) do
             num / 2
         end
+
+
+        binary_scale = BigFloat(0; precision = p)
+        setprecision(BigFloat, 32) do
+            BFLA._mpfr_set_ui_2exp!(binary_scale, 3, 1 - p)
+        end
+        @test precision(binary_scale) == p
+        @test binary_scale == setprecision(BigFloat, p) do
+            BigFloat(3; precision = p) * BigFloat(2; precision = p)^(1 - p)
+        end
+        @test_throws ArgumentError BFLA._mpfr_set_ui_2exp!(
+            binary_scale, -1, 0,
+        )
     end
 end
