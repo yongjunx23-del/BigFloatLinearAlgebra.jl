@@ -368,6 +368,8 @@ function _cholesky_solve!(
     triangle::Triangle,
     p::Int,
     rhs::AbstractVecOrMat{BigFloat},
+    ::Union{Nothing,BFLAWorkspace},
+    ::Int,
 )
     return _with_precision(p) do
         T = triangle === Lower ? LowerTriangular(L) : UpperTriangular(L)

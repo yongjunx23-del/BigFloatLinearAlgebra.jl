@@ -207,17 +207,58 @@ function _qr_default_rtol(p::Int, m::Int, n::Int)
     return result
 end
 
+function _qr_segment_norm!(
+    result::BigFloat,
+    A::AbstractMatrix{BigFloat},
+    first_row::Int,
+    column::Int,
+    scale::BigFloat,
+    sumsq::BigFloat,
+    absolute::BigFloat,
+    ratio::BigFloat,
+    term::BigFloat,
+    one_value::BigFloat,
+)
+    MA.operate!(zero, scale)
+    MA.operate_to!(sumsq, copy, one_value)
+    @inbounds for row in first_row:size(A, 1)
+        _factor_abs_to!(absolute, A[row, column])
+        iszero(absolute) && continue
+        if scale < absolute
+            _mpfr_div!(ratio, scale, absolute)
+            MA.operate_to!(term, *, ratio, ratio)
+            MA.operate!(*, term, sumsq)
+            MA.operate!(+, term, one_value)
+            MA.operate_to!(sumsq, copy, term)
+            MA.operate_to!(scale, copy, absolute)
+        else
+            _mpfr_div!(ratio, absolute, scale)
+            MA.buffered_operate!(term, MA.add_mul, sumsq, ratio, ratio)
+        end
+    end
+    if iszero(scale)
+        MA.operate!(zero, result)
+    else
+        _mpfr_sqrt!(ratio, sumsq)
+        MA.operate_to!(result, *, scale, ratio)
+    end
+    return result
+end
+
 function _qr_reference_scale(A::AbstractMatrix{BigFloat}, p::Int)
     scale = BigFloat(0; precision = p)
-    acc = BigFloat(0; precision = p)
-    buf = BigFloat(0; precision = p)
     colnorm = BigFloat(0; precision = p)
+    norm_scale = BigFloat(0; precision = p)
+    sumsq = BigFloat(0; precision = p)
+    absolute = BigFloat(0; precision = p)
+    ratio = BigFloat(0; precision = p)
+    term = BigFloat(0; precision = p)
+    one_value = BigFloat(1; precision = p)
     @inbounds for j in axes(A, 2)
-        MA.operate!(zero, acc)
-        for i in axes(A, 1)
-            MA.buffered_operate!(buf, MA.add_mul, acc, A[i, j], A[i, j])
-        end
-        _mpfr_sqrt!(colnorm, acc)
+        _qr_segment_norm!(
+            colnorm, A, first(axes(A, 1)), j, norm_scale, sumsq,
+            absolute, ratio, term, one_value,
+        )
         colnorm > scale && MA.operate_to!(scale, copy, colnorm)
     end
     return scale
@@ -456,48 +497,90 @@ function _apply_q_common!(
     return B
 end
 
-function ldiv!(F::BFLAQRFactor, rhs::AbstractVecOrMat{BigFloat})
+function _qr_ldiv!(
+    F::BFLAQRFactor,
+    rhs::AbstractVecOrMat{BigFloat},
+    trusted::Bool,
+    workspace::Union{Nothing,BFLAWorkspace},
+    workspace_worker::Int,
+    operation::AbstractString,
+)
     issuccess(F) || throw(ArgumentError(
-        "ldiv!: QR factor status is not successful",
+        "$operation: QR factor status is not successful",
     ))
     m, n = size(F.factors)
-    size(rhs, 1) == m || throw(DimensionMismatch("ldiv!: right-hand side rows differ"))
+    size(rhs, 1) == m || throw(DimensionMismatch(
+        "$operation: right-hand side rows differ",
+    ))
     m >= n || throw(DimensionMismatch(
-        "ldiv!: in-place QR solve requires rows >= columns",
+        "$operation: in-place QR solve requires rows >= columns",
     ))
-    _require_no_alias(rhs, F.factors, "ldiv!")
-    _validate_factor_precision(F, "ldiv!", rhs)
-    (_all_finite(F.factors) && _all_finite(F.tau) &&
-     isfinite(F.tolerance) && isfinite(F.atol) && isfinite(F.rtol) &&
-     isfinite(F.reference_scale) && isfinite(F.effective_threshold)) ||
-        throw(DomainError(
-        F, "ldiv!: factor storage contains non-finite entries",
-    ))
+    _require_no_alias(rhs, F.factors, operation)
+    if trusted
+        _validate_trusted_rhs_precision(F, operation, rhs)
+    else
+        _validate_factor_precision(F, operation, rhs)
+        (_all_finite(F.factors) && _all_finite(F.tau) &&
+         isfinite(F.tolerance) && isfinite(F.atol) && isfinite(F.rtol) &&
+         isfinite(F.reference_scale) && isfinite(F.effective_threshold)) ||
+            throw(DomainError(
+            F, "$operation: factor storage contains non-finite entries",
+        ))
+    end
     _all_finite(rhs) || throw(DomainError(
-        rhs, "ldiv!: right-hand side contains non-finite entries",
+        rhs, "$operation: right-hand side contains non-finite entries",
     ))
-    _qr_solve!(F.backend, F, rhs)
+    _validate_solve_workspace(
+        workspace, workspace_worker, F.precision_bits, operation,
+    )
+    _qr_solve!(F.backend, F, rhs, workspace, workspace_worker)
     _all_finite(rhs) || throw(DomainError(
-        rhs, "ldiv!: solve produced non-finite entries",
+        rhs, "$operation: solve produced non-finite entries",
     ))
     return rhs
+end
+
+function ldiv!(
+    F::BFLAQRFactor,
+    rhs::AbstractVecOrMat{BigFloat};
+    workspace::Union{Nothing,BFLAWorkspace}=nothing,
+    workspace_worker::Int=1,
+)
+    return _qr_ldiv!(F, rhs, false, workspace, workspace_worker, "ldiv!")
+end
+
+function ldiv_trusted!(
+    F::BFLAQRFactor,
+    rhs::AbstractVecOrMat{BigFloat};
+    workspace::Union{Nothing,BFLAWorkspace}=nothing,
+    workspace_worker::Int=1,
+)
+    return _qr_ldiv!(
+        F, rhs, true, workspace, workspace_worker, "ldiv_trusted!",
+    )
 end
 
 _qr_solve!(
     ::NativeBackend,
     F::BFLAQRFactor,
     rhs::AbstractVecOrMat{BigFloat},
-) = _qr_solve_common!(F, rhs)
+    workspace::Union{Nothing,BFLAWorkspace},
+    workspace_worker::Int,
+) = _qr_solve_common!(F, rhs, workspace, workspace_worker)
 
 _qr_solve!(
     ::GenericBackend,
     F::BFLAQRFactor,
     rhs::AbstractVecOrMat{BigFloat},
-) = _qr_solve_common!(F, rhs)
+    workspace::Union{Nothing,BFLAWorkspace},
+    workspace_worker::Int,
+) = _qr_solve_common!(F, rhs, workspace, workspace_worker)
 
 function _qr_solve_common!(
     F::BFLAQRFactor,
     rhs::AbstractVecOrMat{BigFloat},
+    workspace::Union{Nothing,BFLAWorkspace},
+    workspace_worker::Int,
 )
     m, n = size(F.factors)
     # y = Qᵀ rhs. This remains an explicit dispatch through the factor's
@@ -508,11 +591,17 @@ function _qr_solve_common!(
     r = F.rank
     p = F.precision_bits
     A = F.factors
-    acc = BigFloat(0; precision = p)
-    buf = BigFloat(0; precision = p)
+    acc = _solve_scratch(workspace, workspace_worker, 1, p)
+    buf = _solve_scratch(workspace, workspace_worker, 2, p)
+    storage = workspace === nothing ?
+        owned_zeros(BigFloat, n; precision_bits=p) :
+        workspace_buffer!(workspace, workspace_worker, n)
+    x = view(storage, 1:n)
     R = reshape(rhs, m, :)
     @inbounds for col in axes(R, 2)
-        x = [BigFloat(0; precision = p) for _ in 1:n]
+        for i in 1:n
+            MA.operate!(zero, x[i])
+        end
         for i in r:-1:1
             MA.operate!(zero, acc)
             for k in (i + 1):r
@@ -528,8 +617,30 @@ function _qr_solve_common!(
     return rhs
 end
 
-solve!(F::BFLAQRFactor, rhs::AbstractVecOrMat{BigFloat}) = ldiv!(F, rhs)
-solve(F::BFLAQRFactor, rhs::AbstractVecOrMat{BigFloat}) = ldiv!(F, owned_copy(rhs))
+function solve!(
+    F::BFLAQRFactor,
+    rhs::AbstractVecOrMat{BigFloat};
+    workspace::Union{Nothing,BFLAWorkspace}=nothing,
+    workspace_worker::Int=1,
+)
+    return ldiv!(
+        F, rhs; workspace=workspace, workspace_worker=workspace_worker,
+    )
+end
+
+function solve(
+    F::BFLAQRFactor,
+    rhs::AbstractVecOrMat{BigFloat};
+    workspace::Union{Nothing,BFLAWorkspace}=nothing,
+    workspace_worker::Int=1,
+)
+    return ldiv!(
+        F,
+        owned_copy(rhs);
+        workspace=workspace,
+        workspace_worker=workspace_worker,
+    )
+end
 
 # --- Native column-pivoted Householder QR -------------------------------
 
@@ -538,30 +649,45 @@ function _qr!(::NativeBackend, A::AbstractMatrix{BigFloat}, p::Int, tol::BigFloa
     r = min(m, n)
     tau = [BigFloat(0; precision = p) for _ in 1:r]
     jpvt = collect(1:n)
-    tol_sq = BigFloat(0; precision = p)
-    MA.operate_to!(tol_sq, *, tol, tol)
-    # squared column norms
-    cn = [BigFloat(0; precision = p) for _ in 1:n]
+    # Current and last exactly recomputed column 2-norms. Keeping both is the
+    # LAPACK-style reliability signal for guarded downdates.
+    column_norms = [BigFloat(0; precision = p) for _ in 1:n]
+    exact_norms = [BigFloat(0; precision = p) for _ in 1:n]
     acc = BigFloat(0; precision = p)
     buf = BigFloat(0; precision = p)
+    norm_scale = BigFloat(0; precision = p)
+    norm_sumsq = BigFloat(0; precision = p)
+    norm_absolute = BigFloat(0; precision = p)
+    norm_ratio = BigFloat(0; precision = p)
+    norm_term = BigFloat(0; precision = p)
+    one_value = BigFloat(1; precision = p)
+    two_value = BigFloat(2; precision = p)
+    epsilon = BigFloat(0; precision = p)
+    _mpfr_set_ui_2exp!(epsilon, 1, 1 - p)
+    recompute_guard = BigFloat(0; precision = p)
+    _mpfr_sqrt!(recompute_guard, epsilon)
+    temporary = BigFloat(0; precision = p)
+    temporary_2 = BigFloat(0; precision = p)
+    s_scratch = BigFloat(0; precision = p)
+    v1 = BigFloat(0; precision = p)
     for j in 1:n
-        MA.operate!(zero, acc)
-        for i in 1:m
-            MA.buffered_operate!(buf, MA.add_mul, acc, A[i, j], A[i, j])
-        end
-        MA.operate_to!(cn[j], copy, acc)
+        _qr_segment_norm!(
+            column_norms[j], A, 1, j, norm_scale, norm_sumsq,
+            norm_absolute, norm_ratio, norm_term, one_value,
+        )
+        MA.operate_to!(exact_norms[j], copy, column_norms[j])
     end
     rank = 0
     for k in 1:r
         piv = k
-        mx = cn[k]
+        mx = column_norms[k]
         for j in (k + 1):n
-            if cn[j] > mx
-                mx = cn[j]
+            if column_norms[j] > mx
+                mx = column_norms[j]
                 piv = j
             end
         end
-        if mx <= tol_sq
+        if mx <= tol
             break
         end
         if piv != k
@@ -569,22 +695,22 @@ function _qr!(::NativeBackend, A::AbstractMatrix{BigFloat}, p::Int, tol::BigFloa
                 A[i, k], A[i, piv] = A[i, piv], A[i, k]
             end
             jpvt[k], jpvt[piv] = jpvt[piv], jpvt[k]
-            cn[k], cn[piv] = cn[piv], cn[k]
+            column_norms[k], column_norms[piv] =
+                column_norms[piv], column_norms[k]
+            exact_norms[k], exact_norms[piv] =
+                exact_norms[piv], exact_norms[k]
         end
         # Householder reflector on A[k:m, k]
-        MA.operate!(zero, acc)
-        for i in k:m
-            MA.buffered_operate!(buf, MA.add_mul, acc, A[i, k], A[i, k])
-        end
-        _mpfr_sqrt!(acc, acc)  # xnorm
+        _qr_segment_norm!(
+            acc, A, k, k, norm_scale, norm_sumsq, norm_absolute,
+            norm_ratio, norm_term, one_value,
+        )
         x1 = A[k, k]
-        s_scratch = BigFloat(0; precision = p)
         if x1 >= 0
             MA.operate_to!(s_scratch, -, acc)     # s = -xnorm
         else
             MA.operate_to!(s_scratch, copy, acc)  # s = +xnorm
         end
-        v1 = BigFloat(0; precision = p)
         MA.operate_to!(v1, -, x1, s_scratch)      # v1 = x1 - s, at precision p
         MA.operate_to!(A[k, k], copy, s_scratch)  # R[k,k] = s
         # normalize v[k] = 1 implicitly; store v[i] = A[i,k]/v1 for i > k
@@ -592,11 +718,11 @@ function _qr!(::NativeBackend, A::AbstractMatrix{BigFloat}, p::Int, tol::BigFloa
             _mpfr_div!(A[i, k], A[i, k], v1)
         end
         # vnorm2 = v1² + Σ_{i>k} A[i,k]²
-        MA.operate_to!(acc, copy, BigFloat(1; precision = p))
+        MA.operate_to!(acc, copy, one_value)
         for i in (k + 1):m
             MA.buffered_operate!(buf, MA.add_mul, acc, A[i, k], A[i, k])
         end
-        _mpfr_div!(tau[k], BigFloat(2; precision = p), acc)
+        _mpfr_div!(tau[k], two_value, acc)
         # apply H to trailing columns
         for j in (k + 1):n
             MA.operate!(zero, acc)
@@ -612,10 +738,38 @@ function _qr!(::NativeBackend, A::AbstractMatrix{BigFloat}, p::Int, tol::BigFloa
                 MA.operate_to!(A[i, j], -, A[i, j], buf)
             end
         end
-        # update column norms: cn[j] -= A[k,j]² for j > k
+        # LAPACK-style guarded downdate. When cancellation makes the estimate
+        # unreliable, recompute the exact trailing norm in deterministic row
+        # order before the next pivot selection.
         for j in (k + 1):n
-            MA.operate_to!(buf, *, A[k, j], A[k, j])
-            MA.operate_to!(cn[j], -, cn[j], buf)
+            iszero(column_norms[j]) && continue
+            _factor_abs_to!(norm_absolute, A[k, j])
+            _mpfr_div!(temporary, norm_absolute, column_norms[j])
+            if temporary >= one_value
+                MA.operate!(zero, temporary_2)
+            else
+                MA.operate_to!(temporary_2, -, one_value, temporary)
+                MA.operate_to!(norm_term, +, one_value, temporary)
+                MA.operate!(*, temporary_2, norm_term)
+            end
+            if iszero(exact_norms[j])
+                MA.operate!(zero, norm_term)
+            else
+                _mpfr_div!(norm_term, column_norms[j], exact_norms[j])
+                MA.operate!(*, norm_term, norm_term)
+                MA.operate!(*, norm_term, temporary_2)
+            end
+            if !isfinite(norm_term) || norm_term <= recompute_guard
+                _qr_segment_norm!(
+                    column_norms[j], A, k + 1, j, norm_scale,
+                    norm_sumsq, norm_absolute, norm_ratio, norm_term,
+                    one_value,
+                )
+                MA.operate_to!(exact_norms[j], copy, column_norms[j])
+            else
+                _mpfr_sqrt!(temporary_2, temporary_2)
+                MA.operate!(*, column_norms[j], temporary_2)
+            end
         end
         rank += 1
     end

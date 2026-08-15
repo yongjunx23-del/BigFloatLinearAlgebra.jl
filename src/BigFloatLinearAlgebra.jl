@@ -159,8 +159,10 @@ export AbstractBFLABackend,
     residual!,
     normwise_backward_error,
     higher_precision_residual!,
+    refinement_correction!,
     refine_once!,
     ldiv!,
+    ldiv_trusted!,
     solve!,
     solve
 

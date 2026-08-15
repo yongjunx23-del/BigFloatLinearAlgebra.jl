@@ -100,10 +100,13 @@ BFLA_SOURCE_COMMIT=$(git rev-parse HEAD) \
   julia --project=. -t 4 benchmark/run_production_cycles.jl
 ```
 
-The reusable `BFLAWorkspace` remains caller-managed. Cholesky accepts it only
-for the measured authoritative-triangle identity scan; the standalone runner
-preserves an ordinary Cholesky row beside it so allocation and timing effects
-remain auditable. No other public kernel accepts a workspace parameter.
+The reusable `BFLAWorkspace` remains caller-managed. Factorization benchmarks
+retain ordinary and explicit ownership-workspace rows where applicable. The
+`run_repeated_solves.jl` runner compares checked, trusted, and trusted-workspace
+factor solves for Cholesky, LDLT, RRQR, and LU, with vector and multi-RHS cases.
+It gates Native and Generic results before reporting warm timing and allocation
+statistics. Configure it with `BFLA_BENCH_PRECISIONS`, `BFLA_BENCH_SIZES`,
+`BFLA_BENCH_NRHS`, `BFLA_BENCH_SAMPLES`, and `BFLA_BENCH_WARMUP`.
 
 Configuration (operation set, precisions, sizes) lives at the top of
 `run_kernels.jl`. Keep sizes below `512` unless the machine has ample memory;

@@ -69,12 +69,13 @@ assertions.
 - No global mutable workspace is used.
 - Worker-local scratch is independently owned, and different precision
   contexts never share mutable MPFR scratch.
-- `BFLAWorkspace` is caller-managed storage. Cholesky explicitly accepts it to
-  reuse the `UInt` identity buffer for its ownership precheck; workspace
-  precision must match operation precision, and concurrent calls use distinct
-  worker slots. Other kernels do not accept or silently ignore it. Callers can
-  explicitly obtain MPFR scratch with `workspace_scratch!` and
-  `workspace_buffer!`.
+- `BFLAWorkspace` is caller-managed storage. Cholesky and LDLT factorization
+  can reuse a `UInt` identity buffer for ownership prechecks. Cholesky, LDLT,
+  RRQR, and LU solves accept its validated worker contract. Native solve
+  scratch and the common LDLT/RRQR buffers are reused; Generic Cholesky/LU
+  retain `LinearAlgebra` internal allocation. Workspace precision must match
+  factor precision, scratch may be overwritten, and concurrent calls sharing
+  a workspace use distinct worker slots.
 - The Generic backend serializes its scoped precision context through an
   internal lock; Native requires no lock.
 
@@ -103,6 +104,12 @@ assertions.
 - LDLT solve, QR Q application, and QR solve dispatch through the backend
   recorded in the factor. An unsupported recorded backend raises
   `UnsupportedOperation` before numerical storage is modified.
+- The checked `ldiv!` remains the default factor-use boundary and validates
+  live factor storage and metadata. `ldiv_trusted!` is a separate explicit API
+  for callers that guarantee those objects have not changed since successful
+  factorization. Trusted solve still validates status, dimensions, RHS alias,
+  RHS precision and finiteness, workspace, and recorded backend dispatch. It
+  never retries or falls back.
 - Residual and backward-error primitives report numerical facts only. They do
   not choose a tolerance, refinement count, precision escalation, factorization,
   or backend fallback.
@@ -110,12 +117,12 @@ assertions.
   `higher_precision_residual!` API. It requires an explicit
   `residual_precision=q`, matching q-bit caller storage, with `q > p`, and
   returns both factor and residual precision in its diagnostics.
-- `refine_once!` executes exactly one requested correction through the factor's
-  recorded backend. It performs all structural, alias, status, and precision
-  validation before writing outputs. Once numerical work begins, residual and
-  correction storage may be overwritten on solve failure; no rollback or
-  automatic retry is promised. Non-authoritative factor triangles remain
-  ignored.
+- `refinement_correction!` performs exactly one requested factor solve for a
+  caller-provided residual. It does not select a tolerance, loop, change
+  precision, refactor, accept a result, or choose fallback. `refine_once!`
+  retains its one-step residual/error reporting wrapper. Once numerical work
+  begins, correction storage may be overwritten on solve failure; no rollback
+  or automatic retry is promised.
 - `cholesky!(...; check=true)` throws `PosDefException` (or `DomainError` for
   non-finite input); `check=false` returns a factor with a nonzero `info`;
   `try_cholesky!` returns `nothing` on failure.
@@ -135,6 +142,10 @@ assertions.
   Mutating it invalidates the numerical factor. Use-boundary checks detect
   precision and non-finite corruption but cannot certify arbitrary numeric
   modifications.
+- Structural metadata recorded at factorization time remains cheap to query.
+  Numerical summaries derived from `factor_matrix(F)` are recomputed by the
+  checked diagnostics API rather than cached, because the public borrowed
+  storage is mutable and a cache could become stale.
 - Symmetric factor storage keeps every matrix slot as an independently owned
   MPFR value, including mirrored LDLT entries after pivoting and updates.
 - In-place Cholesky rejects shared `BigFloat` objects within its authoritative

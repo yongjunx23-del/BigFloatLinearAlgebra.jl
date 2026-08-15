@@ -37,15 +37,15 @@ In-place LDLT validates independent ownership across its authoritative lower
 triangle before mutation. It rejects shared lower entries with `ArgumentError`;
 sharing confined to the stale upper triangle is allowed because that triangle
 is rebuilt with independent numeric copies. Allocating `ldlt` deep-copies and
-therefore repairs a pre-aliased source.
+therefore repairs a pre-aliased source. An optional precision-matched
+`BFLAWorkspace` can reuse the worker-local `UInt` identity buffer for this scan.
 
 In-place Cholesky applies the same rule to the selected authoritative triangle:
 `Lower` checks only lower entries and `Upper` checks only upper entries. The
 check completes before factorization mutation. Inactive stale, non-finite, or
 shared entries do not affect factorization, while allocating `cholesky` repairs
-source-side sharing through `owned_copy`. An optional precision-matched
-`BFLAWorkspace` reuses only the worker-local `UInt` identity buffer for this
-scan; it stores no matrix references or MPFR pointers and does not weaken the
+source-side sharing through `owned_copy`. The ownership identity buffers store
+no matrix references or MPFR pointers and do not weaken either factorization's
 ownership check.
 
 ## In-place vs. allocating factorization

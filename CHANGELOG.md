@@ -20,12 +20,25 @@ All notable changes to this project are documented here. The format is based on
 - `NativeBackend` kernels extracted and generalized from the SDPX legacy
   BigFloat dense kernels (see `THIRD_PARTY_NOTICES.md`).
 - Immutable `KernelConfig` and precision-scoped `BFLAWorkspace` storage.
+- Explicit `ldiv_trusted!` repeated-solve API plus caller-owned solve workspace
+  support for Cholesky, LDLT, RRQR, and LU. The checked `ldiv!` contract is
+  unchanged; trusted solves retain status, shape, RHS, precision, alias,
+  workspace, and backend validation while skipping the caller-guaranteed live
+  factor scan.
+- Correction-only `refinement_correction!`, which performs exactly one
+  requested factor solve without solver tolerance, iteration, refactor,
+  precision escalation, acceptance, or fallback policy.
 - Blocked and explicitly threaded Native GEMM, SYRK, TRSM, and Cholesky paths.
 - Solver-relevant symmetric kernels: `gemmt!`, `symv!`, and `syr2k!`.
 - Symmetric-indefinite Bunch-Kaufman LDLT factors, solves, inertia, pivot
   structure, and diagnostics.
+- Scale-aware LDLT 2x2 pivot factor/solve/inertia arithmetic and normalized
+  Bunch-Kaufman comparisons, avoiding avoidable overflow for finite
+  extreme-range blocks.
 - Column-pivoted rank-revealing QR with explicit permutation, numerical rank,
   R diagonal, Q/Q-transpose application, and vector/multi-RHS solve.
+- Stable RRQR column norms with guarded exact trailing-norm recomputation,
+  preserving deterministic pivots and caller-owned rank tolerance policy.
 - Caller-owned residual computation and normwise backward-error measurement
   for ordinary and transposed vector/multi-RHS systems.
 - Explicit higher-precision residual computation with p/q precision diagnostics

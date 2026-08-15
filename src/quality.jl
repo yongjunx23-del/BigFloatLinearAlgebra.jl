@@ -393,6 +393,82 @@ function _higher_precision_residual!(
 end
 
 """
+    refinement_correction!(correction, factor, residual;
+                           trusted=false, workspace=nothing,
+                           workspace_worker=1)
+
+Convert a caller-provided residual into factor precision and perform exactly
+one factor solve, overwriting `correction`. This provider-level primitive does
+not update a solution, choose a tolerance, iterate, refactor, change factor
+precision, or select a fallback. With `trusted=true`, the caller explicitly
+guarantees that factor storage and metadata have not changed; all status,
+dimension, alias, residual/correction precision and finiteness, workspace, and
+backend checks remain active.
+"""
+function refinement_correction! end
+
+function refinement_correction!(
+    correction::AbstractVecOrMat{BigFloat},
+    factor::AbstractBFLAFactor,
+    residual::AbstractVecOrMat{BigFloat};
+    trusted::Bool=false,
+    workspace::Union{Nothing,BFLAWorkspace}=nothing,
+    workspace_worker::Int=1,
+)
+    operation = "refinement_correction!"
+    factors = factor_matrix(factor)
+    size(factors, 1) == size(factors, 2) || throw(DimensionMismatch(
+        "$operation: correction requires a square factor",
+    ))
+    size(correction) == size(residual) || throw(DimensionMismatch(
+        "$operation: correction and residual dimensions differ",
+    ))
+    ndims(correction) == ndims(residual) || throw(DimensionMismatch(
+        "$operation: correction and residual dimensionality differ",
+    ))
+    size(correction, 1) == size(factors, 1) || throw(DimensionMismatch(
+        "$operation: factor and residual dimensions differ",
+    ))
+    issuccess(factor) || throw(ArgumentError(
+        "$operation: factor status is not successful",
+    ))
+    factor isa BFLAQRFactor && factor_rank(factor) < size(factors, 1) &&
+        throw(LinearAlgebra.SingularException(factor_rank(factor) + 1))
+    _require_no_alias(correction, residual, operation)
+    _require_no_alias(correction, factors, operation)
+    _require_no_alias(residual, factors, operation)
+
+    p = if trusted
+        _validate_trusted_rhs_precision(factor, operation, correction)
+    else
+        _validate_factor_precision(factor, operation, correction)
+    end
+    q = isempty(residual) ? p :
+        _require_precision(_check_precision(residual), operation)
+    q >= p || throw(ArgumentError(
+        "$operation: residual precision ($q) must be at least factor " *
+        "precision ($p)",
+    ))
+    (!trusted && !_factor_storage_finite(factor)) && throw(DomainError(
+        factor, "$operation: factor storage contains non-finite entries",
+    ))
+    _all_finite(residual) || throw(DomainError(
+        residual, "$operation: residual contains non-finite entries",
+    ))
+    _validate_solve_workspace(
+        workspace, workspace_worker, p, operation,
+    )
+
+    convert_owned!(correction, residual)
+    return ldiv_trusted!(
+        factor,
+        correction;
+        workspace=workspace,
+        workspace_worker=workspace_worker,
+    )
+end
+
+"""
     refine_once!(factor, A, x, b, residual, correction; trans=NoTrans)
 
 Perform exactly one iterative-refinement correction using the backend and
@@ -421,6 +497,8 @@ function refine_once!(
     residual::AbstractVecOrMat{BigFloat},
     correction::AbstractVecOrMat{BigFloat};
     trans::TransposeOp=NoTrans,
+    workspace::Union{Nothing,BFLAWorkspace}=nothing,
+    workspace_worker::Int=1,
 )
     _require_valid_transpose(trans, "refine_once!")
     trans === NoTrans || throw(UnsupportedOperation(
@@ -479,6 +557,9 @@ function refine_once!(
      _all_finite(b)) || throw(DomainError(
         (factor, A, x, b), "refine_once!: inputs must be finite",
     ))
+    _validate_solve_workspace(
+        workspace, workspace_worker, p, "refine_once!",
+    )
 
     backend = factor_backend(factor)
     before = if q == p
@@ -498,8 +579,14 @@ function refine_once!(
         report.backward_error
     end
 
-    convert_owned!(correction, residual)
-    solve!(factor, correction)
+    refinement_correction!(
+        correction,
+        factor,
+        residual;
+        trusted=true,
+        workspace=workspace,
+        workspace_worker=workspace_worker,
+    )
     _refinement_update!(backend, x, correction, p)
 
     after = if q == p

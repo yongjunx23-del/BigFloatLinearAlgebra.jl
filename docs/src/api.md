@@ -15,6 +15,8 @@ authoritative Cholesky triangles using the public `Triangle` enum: `(Lower,)`
 for `NativeBackend`, and `(Lower, Upper)` for `GenericBackend`.
 `cholesky_workspace = true` states that the backend accepts the explicit
 ownership-scan workspace contract described below.
+`factor_solve_workspace = true` states that factor solves accept the explicit
+caller-owned solve workspace contract. It does not select another backend.
 Both backends explicitly report column-pivoted rank-revealing QR with
 `unpivoted_qr = false`, `rank_revealing_qr = true`, and
 `qr_pivoting = :column`.
@@ -79,9 +81,13 @@ workspace_buffer!(workspace, worker, length)
 
 `thread_count` must be positive and block sizes must be non-negative. A zero
 block size selects the unblocked Native kernel. `BFLAWorkspace` is explicitly
-caller-managed storage. Cholesky alone can explicitly consume its worker-local
-identity buffer to reuse ownership-scan allocation; no other kernel accepts or
-silently ignores a workspace keyword.
+caller-managed storage. Cholesky and LDLT factorization can consume a
+worker-local identity buffer for ownership scans. Cholesky, LDLT, RRQR, and LU
+solves accept the same validated workspace contract. BFLA-owned Native solve
+scratch and the common LDLT/RRQR solve buffers are reused; Generic Cholesky/LU
+still use `LinearAlgebra`'s internal allocations. Scratch is overwritten by a
+call; concurrent calls sharing one workspace must use distinct worker slots.
+The workspace never selects a backend or fallback.
 
 ## Level 1
 
@@ -122,9 +128,10 @@ cholesky!(backend, A; triangle = Lower, check = true, workspace = nothing,
           workspace_worker = 1)
 cholesky(backend, A; triangle = Lower, check = true, workspace = nothing,
          workspace_worker = 1)
-ldiv!(factor, rhs)
-solve!(factor, rhs)
-solve(factor, rhs)
+ldiv!(factor, rhs; workspace = nothing, workspace_worker = 1)
+ldiv_trusted!(factor, rhs; workspace = nothing, workspace_worker = 1)
+solve!(factor, rhs; workspace = nothing, workspace_worker = 1)
+solve(factor, rhs; workspace = nothing, workspace_worker = 1)
 ```
 
 In-place Cholesky requires independent `BigFloat` objects in the authoritative
@@ -135,12 +142,20 @@ element sharing. When supplied, the workspace precision must equal matrix
 precision. Concurrent calls sharing one workspace must reserve distinct worker
 slots; a workspace never changes the backend or numerical algorithm.
 
+The checked `ldiv!` validates the live factor storage, metadata, RHS, and
+backend before use. `ldiv_trusted!` is an explicit repeated-solve boundary for
+callers that guarantee the factor storage and auxiliary metadata have not
+changed since successful factorization. It still validates factor status,
+dimensions, factor/RHS aliasing, RHS precision and finiteness, workspace, and
+recorded backend dispatch. It never falls back. A trusted call on a mutated
+factor is caller error; use `ldiv!` whenever that guarantee is unavailable.
+
 ## LDLT
 
 ```julia
-try_ldlt!(backend, A)
-ldlt!(backend, A; check = true)
-ldlt(backend, A; check = true)
+try_ldlt!(backend, A; workspace = nothing, workspace_worker = 1)
+ldlt!(backend, A; check = true, workspace = nothing, workspace_worker = 1)
+ldlt(backend, A; check = true, workspace = nothing, workspace_worker = 1)
 factor_perm(factor)
 factor_blocks(factor)
 factor_inertia(factor)
@@ -183,6 +198,21 @@ solution without changing shape.
 
 LDLT solve, QR Q application, and QR solve always use the backend recorded in
 the factor. There is no operation-level fallback to another backend.
+
+## Correction-only refinement
+
+```julia
+refinement_correction!(correction, factor, residual;
+                       trusted = false,
+                       workspace = nothing,
+                       workspace_worker = 1)
+```
+
+This primitive converts the caller-provided residual into `correction` and
+performs exactly one factor solve. It does not choose a tolerance, iterate,
+change precision, refactor, accept a result, or select a fallback. The safe
+default validates the factor; `trusted=true` uses the same explicit lifecycle
+guarantee as `ldiv_trusted!`.
 
 ## Partial-pivoting LU
 

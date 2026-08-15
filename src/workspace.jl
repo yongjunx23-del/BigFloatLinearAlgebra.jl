@@ -8,14 +8,15 @@
 Caller-managed, ownership-safe scratch storage. All BigFloat storage is created
 at exactly `precision_bits` bits (never from ambient `setprecision`) and is
 split per worker so concurrent callers can reserve disjoint MPFR objects.
-Worker-local identity buffers support the explicit Cholesky ownership scan
-without retaining references or pointers to matrix elements.
+Worker-local identity buffers support explicit Cholesky and LDLT ownership
+scans without retaining references or pointers to matrix elements.
 
 Use [`workspace_scratch!`](@ref) and [`workspace_buffer!`](@ref) to obtain
-worker-local MPFR scratch. Cholesky can additionally consume a worker-local
-identity buffer when explicitly passed `workspace=ws`; other kernels do not
-consume workspace storage. The caller owns the lifetime, worker assignment,
-and synchronization policy, and concurrent calls must use distinct workers.
+worker-local MPFR scratch. Factorization ownership scans and factor solves can
+consume the appropriate worker-local storage when explicitly passed
+`workspace=ws`. Scratch contents may be overwritten by every call. The caller
+owns the lifetime, worker assignment, and synchronization policy, and
+concurrent calls must use distinct workers.
 """
 mutable struct BFLAWorkspace
     precision_bits::Int
@@ -69,6 +70,43 @@ end
 
 workspace_precision(ws::BFLAWorkspace) = ws.precision_bits
 workspace_workers(ws::BFLAWorkspace) = ws.workers
+
+function _validate_solve_workspace(
+    ws::BFLAWorkspace,
+    worker::Int,
+    precision_bits::Int,
+    operation::AbstractString,
+)
+    ws.precision_bits == precision_bits || throw(PrecisionMismatch(
+        precision_bits, ws.precision_bits, nothing,
+    ))
+    1 <= worker <= ws.workers || throw(ArgumentError(
+        "$operation: workspace_worker must be in 1:$(ws.workers)",
+    ))
+    return ws
+end
+
+function _validate_solve_workspace(
+    ::Nothing,
+    worker::Int,
+    ::Int,
+    operation::AbstractString,
+)
+    worker == 1 || throw(ArgumentError(
+        "$operation: workspace_worker requires a workspace",
+    ))
+    return nothing
+end
+
+@inline function _solve_scratch(
+    ws::Union{Nothing,BFLAWorkspace},
+    worker::Int,
+    slot::Int,
+    precision_bits::Int,
+)
+    return ws === nothing ? BigFloat(0; precision=precision_bits) :
+        workspace_scratch!(ws, worker, slot)
+end
 
 """
     workspace_scratch!(ws, worker, slot) -> BigFloat

@@ -75,6 +75,22 @@ function _validate_factor_precision(
     return actual
 end
 
+# Trusted factor use deliberately skips mutable factor storage. The caller has
+# explicitly guaranteed that the factor and its metadata have not changed
+# since a fully checked construction/use boundary. RHS storage is still
+# scanned because it remains caller-owned mutable input for every solve.
+function _validate_trusted_rhs_precision(
+    F::AbstractBFLAFactor,
+    operation::AbstractString,
+    rhs::AbstractVecOrMat{BigFloat},
+)
+    recorded = factor_precision(F)
+    isempty(rhs) && return recorded
+    actual = _require_precision(_check_precision(rhs), operation)
+    actual == recorded || throw(PrecisionMismatch(recorded, actual, nothing))
+    return actual
+end
+
 """
     _require_square(A, op)
 

@@ -26,10 +26,13 @@ cone, certificate, LP, SDP).
 - **Stable factor protocol.** Cholesky, LDLT, RRQR, and LU expose common
   backend/precision/status/failure/diagnostic accessors, so consumers do not
   inspect concrete factor fields.
-- **Explicit optional workspace.** Cholesky can reuse a caller-owned,
-  precision-matched worker slot for its ownership scan. This changes neither
-  backend nor numerical trajectory; other kernels do not accept an ignored
-  workspace keyword.
+- **Explicit trusted reuse.** The fully checked `ldiv!` remains the safe
+  boundary. Callers that control a factor's lifetime can opt into
+  `ldiv_trusted!`, which retains status, dimension, RHS, precision, alias, and
+  backend checks while avoiding a repeated full factor-storage scan.
+- **Caller-owned solve workspace.** Cholesky, LDLT, RRQR, and LU solves accept
+  precision-matched worker-local scratch. LDLT and RRQR reuse flat buffers
+  across vector and multi-RHS solves without process-global mutable state.
 
 See [docs/src](docs/src) for the frozen backend/ownership/precision contracts.
 
@@ -69,8 +72,9 @@ solve!(factor, b)
 - Level 1: `scal!`, `axpy!`, `axpby!`, `dot`, `norminf`.
 - Level 2: `gemv!`, `trsv!`, `syr!`, `symv!`.
 - Level 3: `gemm!`, `syrk!`, `gemmt!`, `syr2k!`, `trmm!`, `trsm!`.
-- Cholesky: `try_cholesky!`, `cholesky!`, `cholesky`, `ldiv!`, `solve!`,
-  `solve`.
+- Factor solve: checked `ldiv!`, explicit `ldiv_trusted!`, `solve!`, and
+  allocating `solve`.
+- Cholesky: `try_cholesky!`, `cholesky!`, `cholesky`.
 - Common factor metadata: `factor_matrix`, `factor_backend`,
   `factor_precision`, `factor_status`, `factor_kind`, `factor_triangle`,
   `factor_failure_position`, `factor_diagnostics`, `issuccess`.
@@ -81,7 +85,7 @@ solve!(factor, b)
   vector/multi-RHS solve.
 - Numerical quality: caller-owned `residual!` and normwise backward-error
   measurement for vector and multi-RHS systems, plus explicit higher-precision
-  residual diagnostics and one requested refinement correction.
+  residual diagnostics and the correction-only `refinement_correction!`.
 
 Only real `BigFloat` is supported in this phase.
 
@@ -91,11 +95,11 @@ Only real `BigFloat` is supported in this phase.
 | --- | --- | --- |
 | GEMM/GEMV/SYRK | yes | yes |
 | TRSM/TRSV/TRMM | yes | yes |
-| Cholesky | lower only; explicit workspace | lower and upper; explicit workspace |
+| Cholesky | lower only; ownership workspace | lower and upper; ownership workspace |
 | LDLT / RRQR / LU | yes | yes |
 | residual / backward error | yes | yes |
 | higher-precision residual / refinement | yes | yes |
-| factor solve | yes | yes |
+| factor solve / caller workspace | yes | yes |
 | threading | explicit 1+ workers | single (serialized) |
 | ownership safe | yes | yes |
 
@@ -111,6 +115,7 @@ julia --project=. -t 1 test/runtests.jl
 julia --project=. -t 4 test/runtests.jl
 julia --project=. benchmark/run_production_cycles.jl
 julia --project=. benchmark/run_standalone.jl
+julia --project=. benchmark/run_repeated_solves.jl
 ```
 
 The unit suite covers ownership, numerical correctness (Native vs. Generic vs.

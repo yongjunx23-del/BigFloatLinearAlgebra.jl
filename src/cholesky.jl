@@ -117,8 +117,58 @@ function cholesky(
 end
 
 # Unpack a factor and dispatch the solve through its recorded backend.
-_cholesky_solve!(F::BFLACholeskyFactor, rhs::AbstractVecOrMat{BigFloat}) =
-    _cholesky_solve!(F.backend, F.factors, F.triangle, F.precision_bits, rhs)
+_cholesky_solve!(
+    F::BFLACholeskyFactor,
+    rhs::AbstractVecOrMat{BigFloat},
+    workspace::Union{Nothing,BFLAWorkspace},
+    workspace_worker::Int,
+) = _cholesky_solve!(
+    F.backend,
+    F.factors,
+    F.triangle,
+    F.precision_bits,
+    rhs,
+    workspace,
+    workspace_worker,
+)
+
+function _cholesky_ldiv!(
+    F::BFLACholeskyFactor,
+    rhs::AbstractVecOrMat{BigFloat},
+    trusted::Bool,
+    workspace::Union{Nothing,BFLAWorkspace},
+    workspace_worker::Int,
+    operation::AbstractString,
+)
+    issuccess(F) || throw(LinearAlgebra.PosDefException(
+        F.status.position === nothing ? 0 : F.status.position,
+    ))
+    n = size(F.factors, 1)
+    size(rhs, 1) == n || throw(DimensionMismatch(
+        "$operation: right-hand side dimensions differ",
+    ))
+    _require_no_alias(rhs, F.factors, operation)
+    if trusted
+        _validate_trusted_rhs_precision(F, operation, rhs)
+    else
+        _validate_factor_precision(F, operation, rhs)
+        _triangle_finite(F.factors, F.triangle) || throw(DomainError(
+            F.factors,
+            "$operation: authoritative factor triangle contains non-finite entries",
+        ))
+    end
+    _all_finite(rhs) || throw(DomainError(
+        rhs, "$operation: right-hand side contains non-finite entries",
+    ))
+    _validate_solve_workspace(
+        workspace, workspace_worker, F.precision_bits, operation,
+    )
+    _cholesky_solve!(F, rhs, workspace, workspace_worker)
+    _all_finite(rhs) || throw(DomainError(
+        rhs, "$operation: solve produced non-finite entries",
+    ))
+    return rhs
+end
 
 """
     ldiv!(factor, rhs) -> rhs
@@ -128,27 +178,37 @@ a lower factor `L` this solves `(L * Lᵀ) * x = rhs`; for an upper factor `U`
 (`GenericBackend` only) it solves `(Uᵀ * U) * x = rhs`. The solve dispatches
 through the backend recorded in the factor.
 """
-function ldiv!(F::BFLACholeskyFactor, rhs::AbstractVecOrMat{BigFloat})
-    issuccess(F) || throw(LinearAlgebra.PosDefException(
-        F.status.position === nothing ? 0 : F.status.position,
-    ))
-    n = size(F.factors, 1)
-    size(rhs, 1) == n ||
-        throw(DimensionMismatch("ldiv!: right-hand side dimensions differ"))
-    _validate_factor_precision(F, "ldiv!", rhs)
-    _require_no_alias(rhs, F.factors, "ldiv!")
-    _triangle_finite(F.factors, F.triangle) || throw(DomainError(
-        F.factors,
-        "ldiv!: authoritative factor triangle contains non-finite entries",
-    ))
-    _all_finite(rhs) || throw(DomainError(
-        rhs, "ldiv!: right-hand side contains non-finite entries",
-    ))
-    _cholesky_solve!(F, rhs)
-    _all_finite(rhs) || throw(DomainError(
-        rhs, "ldiv!: solve produced non-finite entries",
-    ))
-    return rhs
+function ldiv!(
+    F::BFLACholeskyFactor,
+    rhs::AbstractVecOrMat{BigFloat};
+    workspace::Union{Nothing,BFLAWorkspace}=nothing,
+    workspace_worker::Int=1,
+)
+    return _cholesky_ldiv!(
+        F, rhs, false, workspace, workspace_worker, "ldiv!",
+    )
+end
+
+"""
+    ldiv_trusted!(factor, rhs; workspace=nothing, workspace_worker=1)
+
+Explicit repeated-solve path for callers that guarantee the factor storage and
+metadata have not changed since construction or a fully checked use. Factor
+status, dimensions, aliasing, RHS precision/finiteness, workspace identity,
+and backend dispatch remain checked. Only factor storage precision/finiteness
+rescans are skipped.
+"""
+function ldiv_trusted! end
+
+function ldiv_trusted!(
+    F::BFLACholeskyFactor,
+    rhs::AbstractVecOrMat{BigFloat};
+    workspace::Union{Nothing,BFLAWorkspace}=nothing,
+    workspace_worker::Int=1,
+)
+    return _cholesky_ldiv!(
+        F, rhs, true, workspace, workspace_worker, "ldiv_trusted!",
+    )
 end
 
 """
@@ -158,7 +218,16 @@ Alias for `ldiv!(factor, rhs)`.
 """
 function solve! end
 
-solve!(F::BFLACholeskyFactor, rhs::AbstractVecOrMat{BigFloat}) = ldiv!(F, rhs)
+function solve!(
+    F::BFLACholeskyFactor,
+    rhs::AbstractVecOrMat{BigFloat};
+    workspace::Union{Nothing,BFLAWorkspace}=nothing,
+    workspace_worker::Int=1,
+)
+    return ldiv!(
+        F, rhs; workspace=workspace, workspace_worker=workspace_worker,
+    )
+end
 
 """
     solve(factor, rhs) -> Vector or Matrix
@@ -168,6 +237,16 @@ caller's right-hand side is never modified.
 """
 function solve end
 
-function solve(F::BFLACholeskyFactor, rhs::AbstractVecOrMat{BigFloat})
-    return ldiv!(F, owned_copy(rhs))
+function solve(
+    F::BFLACholeskyFactor,
+    rhs::AbstractVecOrMat{BigFloat};
+    workspace::Union{Nothing,BFLAWorkspace}=nothing,
+    workspace_worker::Int=1,
+)
+    return ldiv!(
+        F,
+        owned_copy(rhs);
+        workspace=workspace,
+        workspace_worker=workspace_worker,
+    )
 end

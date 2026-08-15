@@ -36,6 +36,76 @@ factor_kind(::BFLALDLTFactor) = :ldlt
 factor_triangle(::BFLALDLTFactor) = Lower
 issuccess(F::BFLALDLTFactor) = F.status.kind === :success
 
+# Normalize a symmetric 2x2 block with positive row scales. The normalized
+# determinant has the same sign and zero status as the mathematical
+# determinant, without forming products such as d11*d22 or e*e at the original
+# exponent scale.
+function _ldlt_2x2_normalize_rows!(
+    a::BigFloat,
+    e1::BigFloat,
+    e2::BigFloat,
+    c::BigFloat,
+    determinant::BigFloat,
+    row_scale_1::BigFloat,
+    row_scale_2::BigFloat,
+    temporary_1::BigFloat,
+    temporary_2::BigFloat,
+    d11::BigFloat,
+    e::BigFloat,
+    d22::BigFloat,
+)
+    _factor_abs_to!(row_scale_1, d11)
+    _factor_abs_to!(temporary_1, e)
+    temporary_1 > row_scale_1 &&
+        MA.operate_to!(row_scale_1, copy, temporary_1)
+    MA.operate_to!(row_scale_2, copy, temporary_1)
+    _factor_abs_to!(temporary_2, d22)
+    temporary_2 > row_scale_2 &&
+        MA.operate_to!(row_scale_2, copy, temporary_2)
+    if iszero(row_scale_1) || iszero(row_scale_2)
+        MA.operate!(zero, determinant)
+        return false
+    end
+
+    _mpfr_div!(a, d11, row_scale_1)
+    _mpfr_div!(e1, e, row_scale_1)
+    _mpfr_div!(e2, e, row_scale_2)
+    _mpfr_div!(c, d22, row_scale_2)
+    MA.operate_to!(temporary_1, *, a, c)
+    MA.operate_to!(temporary_2, *, e1, e2)
+    MA.operate_to!(determinant, -, temporary_1, temporary_2)
+    return !iszero(determinant)
+end
+
+function _ldlt_2x2_solve_normalized!(
+    x1::BigFloat,
+    x2::BigFloat,
+    a::BigFloat,
+    e1::BigFloat,
+    e2::BigFloat,
+    c::BigFloat,
+    determinant::BigFloat,
+    row_scale_1::BigFloat,
+    row_scale_2::BigFloat,
+    y1::BigFloat,
+    y2::BigFloat,
+    scaled_y1::BigFloat,
+    scaled_y2::BigFloat,
+    work::BigFloat,
+)
+    _mpfr_div!(scaled_y1, y1, row_scale_1)
+    _mpfr_div!(scaled_y2, y2, row_scale_2)
+    MA.operate_to!(x1, *, c, scaled_y1)
+    MA.operate_to!(work, *, e1, scaled_y2)
+    MA.operate!(-, x1, work)
+    _mpfr_div!(x1, x1, determinant)
+    MA.operate_to!(x2, *, a, scaled_y2)
+    MA.operate_to!(work, *, e2, scaled_y1)
+    MA.operate!(-, x2, work)
+    _mpfr_div!(x2, x2, determinant)
+    return x1, x2
+end
+
 """
     factor_perm(F) -> Vector{Int}
 
@@ -70,13 +140,17 @@ function factor_inertia(F::BFLALDLTFactor)
         F.factors,
         "factor_inertia: authoritative factor triangle contains non-finite entries",
     ))
+    return _factor_inertia_unchecked(F)
+end
+
+function _factor_inertia_unchecked(F::BFLALDLTFactor)
     npos = 0
     nneg = 0
     nzero = 0
     A = F.factors
-    product = BigFloat(0; precision = F.precision_bits)
-    square = BigFloat(0; precision = F.precision_bits)
-    determinant = BigFloat(0; precision = F.precision_bits)
+    scratch = [BigFloat(0; precision=F.precision_bits) for _ in 1:9]
+    a, e1, e2, c, determinant, row_scale_1, row_scale_2,
+        temporary_1, temporary_2 = scratch
     k = 1
     for s in F.blocks
         if s == 1
@@ -93,9 +167,10 @@ function factor_inertia(F::BFLALDLTFactor)
             d11 = A[k, k]
             e = A[k + 1, k]
             d22 = A[k + 1, k + 1]
-            MA.operate_to!(product, *, d11, d22)
-            MA.operate_to!(square, *, e, e)
-            MA.operate_to!(determinant, -, product, square)
+            _ldlt_2x2_normalize_rows!(
+                a, e1, e2, c, determinant, row_scale_1, row_scale_2,
+                temporary_1, temporary_2, d11, e, d22,
+            )
             if determinant < 0
                 npos += 1
                 nneg += 1
@@ -119,6 +194,10 @@ function _ldlt_pivot_diagnostics(F::BFLALDLTFactor)
         "factor_diagnostics: authoritative LDLT triangle contains " *
         "non-finite entries",
     ))
+    return _ldlt_pivot_diagnostics_unchecked(F)
+end
+
+function _ldlt_pivot_diagnostics_unchecked(F::BFLALDLTFactor)
     p = F.precision_bits
     A = F.factors
     absolute = BigFloat(0; precision = p)
@@ -128,6 +207,9 @@ function _ldlt_pivot_diagnostics(F::BFLALDLTFactor)
     scale = BigFloat(0; precision = p)
     denominator = BigFloat(0; precision = p)
     quality = BigFloat(0; precision = p)
+    normalized = [BigFloat(0; precision=p) for _ in 1:9]
+    a, e1, e2, c, normalized_determinant, row_scale_1, row_scale_2,
+        temporary_1, temporary_2 = normalized
     minimum_1x1 = nothing
     minimum_2x2_determinant = nothing
     minimum_2x2_quality = nothing
@@ -142,25 +224,45 @@ function _ldlt_pivot_diagnostics(F::BFLALDLTFactor)
             continue
         end
 
+        _ldlt_2x2_normalize_rows!(
+            a, e1, e2, c, normalized_determinant,
+            row_scale_1, row_scale_2, temporary_1, temporary_2,
+            A[k, k], A[k + 1, k], A[k + 1, k + 1],
+        )
+        _factor_abs_to!(absolute, normalized_determinant)
+        # Preserve the established p-bit diagnostic trajectory when the
+        # unscaled expression is representable; use the normalized form only
+        # when direct intermediates overflow or become non-finite.
         MA.operate_to!(product, *, A[k, k], A[k + 1, k + 1])
         MA.operate_to!(square, *, A[k + 1, k], A[k + 1, k])
         MA.operate_to!(determinant, -, product, square)
-        _factor_abs_to!(absolute, determinant)
+        if isfinite(determinant)
+            _factor_abs_to!(absolute, determinant)
+        else
+            _factor_abs_to!(absolute, normalized_determinant)
+            MA.operate_to!(determinant, *, absolute, row_scale_1)
+            MA.operate!(*, determinant, row_scale_2)
+            MA.operate_to!(absolute, copy, determinant)
+        end
         if minimum_2x2_determinant === nothing ||
            absolute < minimum_2x2_determinant
             minimum_2x2_determinant = MA.mutable_copy(absolute)
         end
+
+        _factor_abs_to!(absolute, normalized_determinant)
 
         MA.operate!(zero, scale)
         for value in (A[k, k], A[k + 1, k], A[k + 1, k + 1])
             _factor_abs_to!(determinant, value)
             determinant > scale && MA.operate_to!(scale, copy, determinant)
         end
-        MA.operate_to!(denominator, *, scale, scale)
-        if iszero(denominator)
+        if iszero(scale)
             MA.operate!(zero, quality)
         else
-            _mpfr_div!(quality, absolute, denominator)
+            _mpfr_div!(temporary_1, row_scale_1, scale)
+            _mpfr_div!(temporary_2, row_scale_2, scale)
+            MA.operate_to!(denominator, *, temporary_1, temporary_2)
+            MA.operate_to!(quality, *, absolute, denominator)
         end
         if minimum_2x2_quality === nothing || quality < minimum_2x2_quality
             minimum_2x2_quality = MA.mutable_copy(quality)
@@ -178,11 +280,19 @@ optional failure position. BFLA reports facts and does not decide what a caller
 should do with them.
 """
 function factor_diagnostics(F::BFLALDLTFactor)
-    inertia = issuccess(F) ? factor_inertia(F) : nothing
+    if issuccess(F)
+        _validate_factor_precision(F, "factor_diagnostics")
+        _triangle_finite(F.factors, Lower) || throw(DomainError(
+            F.factors,
+            "factor_diagnostics: authoritative LDLT triangle contains " *
+            "non-finite entries",
+        ))
+    end
+    inertia = issuccess(F) ? _factor_inertia_unchecked(F) : nothing
     n1 = count(==(1), F.blocks)
     n2 = count(==(2), F.blocks)
     minimum_1x1, minimum_2x2_determinant, minimum_2x2_quality =
-        issuccess(F) ? _ldlt_pivot_diagnostics(F) :
+        issuccess(F) ? _ldlt_pivot_diagnostics_unchecked(F) :
         (nothing, nothing, nothing)
     return (
         factor_kind = factor_kind(F),
@@ -219,10 +329,17 @@ function ldlt!(
     backend::AbstractBFLABackend,
     A::AbstractMatrix{BigFloat};
     check::Bool=true,
+    workspace::Union{Nothing,BFLAWorkspace}=nothing,
+    workspace_worker::Int=1,
 )
     _require_square(A, "ldlt!")
     p = _require_precision(_check_precision(A), "ldlt!")
-    _require_independent_triangle_elements(A, Lower, "ldlt!")
+    identity_buffer = _workspace_identity_buffer(
+        workspace, workspace_worker, p, "ldlt!",
+    )
+    _require_independent_triangle_elements(
+        A, Lower, "ldlt!", identity_buffer,
+    )
     n = size(A, 1)
     if !_triangle_finite(A, Lower)
         check && throw(DomainError(
@@ -270,8 +387,19 @@ factor.
 """
 function try_ldlt! end
 
-function try_ldlt!(backend::AbstractBFLABackend, A::AbstractMatrix{BigFloat})
-    F = ldlt!(backend, A; check=false)
+function try_ldlt!(
+    backend::AbstractBFLABackend,
+    A::AbstractMatrix{BigFloat};
+    workspace::Union{Nothing,BFLAWorkspace}=nothing,
+    workspace_worker::Int=1,
+)
+    F = ldlt!(
+        backend,
+        A;
+        check=false,
+        workspace=workspace,
+        workspace_worker=workspace_worker,
+    )
     return issuccess(F) ? F : nothing
 end
 
@@ -282,10 +410,23 @@ Allocating LDLᵀ factorization; `A` is deep-copied first.
 """
 function ldlt end
 
-function ldlt(backend::AbstractBFLABackend, A::AbstractMatrix{BigFloat}; check::Bool=true)
+function ldlt(
+    backend::AbstractBFLABackend,
+    A::AbstractMatrix{BigFloat};
+    check::Bool=true,
+    workspace::Union{Nothing,BFLAWorkspace}=nothing,
+    workspace_worker::Int=1,
+)
     _require_square(A, "ldlt")
     p = _require_precision(_check_precision(A), "ldlt")
-    return ldlt!(backend, owned_copy(A; precision_bits=p); check=check)
+    _workspace_identity_buffer(workspace, workspace_worker, p, "ldlt")
+    return ldlt!(
+        backend,
+        owned_copy(A; precision_bits=p);
+        check=check,
+        workspace=workspace,
+        workspace_worker=workspace_worker,
+    )
 end
 
 function _subdiag_is_d(blocks::Vector{Int}, n::Int)
@@ -300,30 +441,88 @@ function _subdiag_is_d(blocks::Vector{Int}, n::Int)
     return out
 end
 
-function ldiv!(F::BFLALDLTFactor, rhs::AbstractVecOrMat{BigFloat})
+function _ldlt_ldiv!(
+    F::BFLALDLTFactor,
+    rhs::AbstractVecOrMat{BigFloat},
+    trusted::Bool,
+    workspace::Union{Nothing,BFLAWorkspace},
+    workspace_worker::Int,
+    operation::AbstractString,
+)
     issuccess(F) || throw(LinearAlgebra.SingularException(
         F.status.position === nothing ? 0 : F.status.position,
     ))
     n = size(F.factors, 1)
-    size(rhs, 1) == n || throw(DimensionMismatch("ldiv!: right-hand side dimensions differ"))
-    _require_no_alias(rhs, F.factors, "ldiv!")
-    _validate_factor_precision(F, "ldiv!", rhs)
-    _triangle_finite(F.factors, Lower) || throw(DomainError(
-        F.factors,
-        "ldiv!: authoritative factor triangle contains non-finite entries",
+    size(rhs, 1) == n || throw(DimensionMismatch(
+        "$operation: right-hand side dimensions differ",
     ))
+    _require_no_alias(rhs, F.factors, operation)
+    if trusted
+        _validate_trusted_rhs_precision(F, operation, rhs)
+    else
+        _validate_factor_precision(F, operation, rhs)
+        _triangle_finite(F.factors, Lower) || throw(DomainError(
+            F.factors,
+            "$operation: authoritative factor triangle contains non-finite entries",
+        ))
+    end
     _all_finite(rhs) || throw(DomainError(
-        rhs, "ldiv!: right-hand side contains non-finite entries",
+        rhs, "$operation: right-hand side contains non-finite entries",
     ))
-    _ldlt_solve!(F.backend, F, rhs)
+    _validate_solve_workspace(
+        workspace, workspace_worker, F.precision_bits, operation,
+    )
+    _ldlt_solve!(F.backend, F, rhs, workspace, workspace_worker)
     _all_finite(rhs) || throw(DomainError(
-        rhs, "ldiv!: solve produced non-finite entries",
+        rhs, "$operation: solve produced non-finite entries",
     ))
     return rhs
 end
 
-solve!(F::BFLALDLTFactor, rhs::AbstractVecOrMat{BigFloat}) = ldiv!(F, rhs)
-solve(F::BFLALDLTFactor, rhs::AbstractVecOrMat{BigFloat}) = ldiv!(F, owned_copy(rhs))
+function ldiv!(
+    F::BFLALDLTFactor,
+    rhs::AbstractVecOrMat{BigFloat};
+    workspace::Union{Nothing,BFLAWorkspace}=nothing,
+    workspace_worker::Int=1,
+)
+    return _ldlt_ldiv!(F, rhs, false, workspace, workspace_worker, "ldiv!")
+end
+
+function ldiv_trusted!(
+    F::BFLALDLTFactor,
+    rhs::AbstractVecOrMat{BigFloat};
+    workspace::Union{Nothing,BFLAWorkspace}=nothing,
+    workspace_worker::Int=1,
+)
+    return _ldlt_ldiv!(
+        F, rhs, true, workspace, workspace_worker, "ldiv_trusted!",
+    )
+end
+
+function solve!(
+    F::BFLALDLTFactor,
+    rhs::AbstractVecOrMat{BigFloat};
+    workspace::Union{Nothing,BFLAWorkspace}=nothing,
+    workspace_worker::Int=1,
+)
+    return ldiv!(
+        F, rhs; workspace=workspace, workspace_worker=workspace_worker,
+    )
+end
+
+function solve(
+    F::BFLALDLTFactor,
+    rhs::AbstractVecOrMat{BigFloat};
+    workspace::Union{Nothing,BFLAWorkspace}=nothing,
+    workspace_worker::Int=1,
+)
+    return ldiv!(
+        F,
+        owned_copy(rhs);
+        workspace=workspace,
+        workspace_worker=workspace_worker,
+    )
+end
 
 # --- Native Bunch-Kaufman -----------------------------------------------
 
@@ -368,6 +567,12 @@ function _ldlt!(::NativeBackend, A::AbstractMatrix{BigFloat}, p::Int)
     a2v = BigFloat(0; precision = p)
     absolute_value = BigFloat(0; precision = p)
     threshold = BigFloat(0; precision = p)
+    normalized = [BigFloat(0; precision=p) for _ in 1:10]
+    norm_a, norm_e1, norm_e2, norm_c, norm_det, norm_r1, norm_r2,
+        norm_y1, norm_y2, norm_work = normalized
+    comparison_scale = BigFloat(0; precision = p)
+    comparison_left = BigFloat(0; precision = p)
+    comparison_right = BigFloat(0; precision = p)
     k = 1
     @inbounds while k <= n
         # largest off-diagonal magnitude in column k below the diagonal
@@ -405,10 +610,18 @@ function _ldlt!(::NativeBackend, A::AbstractMatrix{BigFloat}, p::Int)
             # Standard Bunch-Kaufman intermediate test:
             # |a_kk| >= alpha * colmax^2 / rowmax. Compare products at factor
             # precision to avoid a division and ambient precision dependence.
-            MA.operate_to!(acc, *, a1v, rmax)
-            MA.operate_to!(detv, *, w, w)
-            MA.operate_to!(threshold, *, alpha, detv)
-            if acc >= threshold
+            MA.operate_to!(comparison_scale, copy, a1v)
+            rmax > comparison_scale &&
+                MA.operate_to!(comparison_scale, copy, rmax)
+            w > comparison_scale &&
+                MA.operate_to!(comparison_scale, copy, w)
+            _mpfr_div!(comparison_left, a1v, comparison_scale)
+            _mpfr_div!(comparison_right, rmax, comparison_scale)
+            MA.operate!(*, comparison_left, comparison_right)
+            _mpfr_div!(comparison_right, w, comparison_scale)
+            MA.operate!(*, comparison_right, comparison_right)
+            MA.operate!(*, comparison_right, alpha)
+            if comparison_left >= comparison_right
                 s = 1
             else
                 MA.operate_to!(absolute_value, abs, A[r, r])
@@ -451,10 +664,10 @@ function _ldlt!(::NativeBackend, A::AbstractMatrix{BigFloat}, p::Int)
             e = A[k + 1, k]
             d11 = A[k, k]
             d22 = A[k + 1, k + 1]
-            MA.operate_to!(w, *, d11, d22)
-            MA.operate_to!(rmax, *, e, e)
-            MA.operate_to!(detv, -, w, rmax)
-            iszero(detv) && return k, perm, blocks
+            _ldlt_2x2_normalize_rows!(
+                norm_a, norm_e1, norm_e2, norm_c, norm_det,
+                norm_r1, norm_r2, norm_y1, norm_y2, d11, e, d22,
+            ) || return k, perm, blocks
             for i in (k + 2):n
                 # Copy the pivot-row entries into scratch before overwriting
                 # A[i,k]/A[i,k+1] in place (BigFloat assignment aliases the
@@ -462,14 +675,12 @@ function _ldlt!(::NativeBackend, A::AbstractMatrix{BigFloat}, p::Int)
                 # would observe the overwritten multiplier).
                 MA.operate_to!(a1v, copy, A[i, k])
                 MA.operate_to!(a2v, copy, A[i, k + 1])
-                MA.operate_to!(w, *, d22, a1v)
-                MA.operate_to!(rmax, *, e, a2v)
-                MA.operate_to!(acc, -, w, rmax)
-                _mpfr_div!(A[i, k], acc, detv)
-                MA.operate_to!(w, *, e, a1v)
-                MA.operate_to!(rmax, *, d11, a2v)
-                MA.operate_to!(acc, -, rmax, w)
-                _mpfr_div!(A[i, k + 1], acc, detv)
+                _ldlt_2x2_solve_normalized!(
+                    A[i, k], A[i, k + 1],
+                    norm_a, norm_e1, norm_e2, norm_c, norm_det,
+                    norm_r1, norm_r2, a1v, a2v,
+                    norm_y1, norm_y2, norm_work,
+                )
                 MA.operate_to!(A[k, i], copy, A[i, k])
                 MA.operate_to!(A[k + 1, i], copy, A[i, k + 1])
             end
@@ -500,17 +711,23 @@ _ldlt_solve!(
     ::NativeBackend,
     F::BFLALDLTFactor,
     rhs::AbstractVecOrMat{BigFloat},
-) = _ldlt_solve_common!(F, rhs)
+    workspace::Union{Nothing,BFLAWorkspace},
+    workspace_worker::Int,
+) = _ldlt_solve_common!(F, rhs, workspace, workspace_worker)
 
 _ldlt_solve!(
     ::GenericBackend,
     F::BFLALDLTFactor,
     rhs::AbstractVecOrMat{BigFloat},
-) = _ldlt_solve_common!(F, rhs)
+    workspace::Union{Nothing,BFLAWorkspace},
+    workspace_worker::Int,
+) = _ldlt_solve_common!(F, rhs, workspace, workspace_worker)
 
 function _ldlt_solve_common!(
     F::BFLALDLTFactor,
     rhs::AbstractVecOrMat{BigFloat},
+    workspace::Union{Nothing,BFLAWorkspace},
+    workspace_worker::Int,
 )
     n = size(F.factors, 1)
     p = F.precision_bits
@@ -518,17 +735,23 @@ function _ldlt_solve_common!(
     perm = F.perm
     subdiag = F.subdiag_is_d
     A = L
-    acc = BigFloat(0; precision = p)
-    buf = BigFloat(0; precision = p)
-    product = BigFloat(0; precision = p)
-    square = BigFloat(0; precision = p)
-    determinant = BigFloat(0; precision = p)
-    numerator = BigFloat(0; precision = p)
+    acc = _solve_scratch(workspace, workspace_worker, 1, p)
+    buf = _solve_scratch(workspace, workspace_worker, 2, p)
+    storage = workspace === nothing ?
+        owned_zeros(BigFloat, 4n + 10; precision_bits=p) :
+        workspace_buffer!(workspace, workspace_worker, 4n + 10)
+    z = view(storage, 1:n)
+    y = view(storage, (n + 1):(2n))
+    w = view(storage, (2n + 1):(3n))
+    x = view(storage, (3n + 1):(4n))
+    normalized = view(storage, (4n + 1):(4n + 10))
+    a, e1, e2, c, scaled_determinant, row_scale_1, row_scale_2,
+        scaled_y1, scaled_y2, solve_work = normalized
     @inbounds for col in axes(rhs, 2)
         # permute: z[i] = rhs[perm[i]]
-        z = [rhs[perm[i], col] for i in 1:n]
-        y = [BigFloat(0; precision = p) for _ in 1:n]
-        w = [BigFloat(0; precision = p) for _ in 1:n]
+        for i in 1:n
+            MA.operate_to!(z[i], copy, rhs[perm[i], col])
+        end
         # forward: L y = z
         for i in 1:n
             MA.operate!(zero, acc)
@@ -546,22 +769,20 @@ function _ldlt_solve_common!(
                 k += 1
             else
                 d11 = A[k, k]; e = A[k + 1, k]; d22 = A[k + 1, k + 1]
-                MA.operate_to!(product, *, d11, d22)
-                MA.operate_to!(square, *, e, e)
-                MA.operate_to!(determinant, -, product, square)
-                MA.operate_to!(product, *, d22, y[k])
-                MA.operate_to!(square, *, e, y[k + 1])
-                MA.operate_to!(numerator, -, product, square)
-                _mpfr_div!(w[k], numerator, determinant)
-                MA.operate_to!(product, *, e, y[k])
-                MA.operate_to!(square, *, d11, y[k + 1])
-                MA.operate_to!(numerator, -, square, product)
-                _mpfr_div!(w[k + 1], numerator, determinant)
+                _ldlt_2x2_normalize_rows!(
+                    a, e1, e2, c, scaled_determinant,
+                    row_scale_1, row_scale_2, scaled_y1, scaled_y2,
+                    d11, e, d22,
+                ) || throw(LinearAlgebra.SingularException(k))
+                _ldlt_2x2_solve_normalized!(
+                    w[k], w[k + 1], a, e1, e2, c, scaled_determinant,
+                    row_scale_1, row_scale_2, y[k], y[k + 1],
+                    scaled_y1, scaled_y2, solve_work,
+                )
                 k += 2
             end
         end
         # backward: Lᵀ z = w
-        x = [BigFloat(0; precision = p) for _ in 1:n]
         for i in n:-1:1
             MA.operate!(zero, acc)
             for j in (i + 1):n
@@ -588,6 +809,11 @@ function _ldlt!(::GenericBackend, A::AbstractMatrix{BigFloat}, p::Int)
         alpha = (BigFloat(1) + sqrt(BigFloat(17))) / BigFloat(8)
         perm = collect(1:n)
         blocks = Int[]
+        normalized = [BigFloat(0; precision=p) for _ in 1:10]
+        norm_a, norm_e1, norm_e2, norm_c, norm_det, norm_r1, norm_r2,
+            norm_y1, norm_y2, norm_work = normalized
+        y1copy = BigFloat(0; precision = p)
+        y2copy = BigFloat(0; precision = p)
         k = 1
         while k <= n
             w = BigFloat(0)
@@ -616,7 +842,11 @@ function _ldlt!(::GenericBackend, A::AbstractMatrix{BigFloat}, p::Int)
                     aj = abs(A[r, j])
                     aj > rmax && (rmax = aj)
                 end
-                if absakk * rmax >= alpha * w * w
+                comparison_scale = max(absakk, rmax, w)
+                comparison_left = (absakk / comparison_scale) *
+                    (rmax / comparison_scale)
+                comparison_right = alpha * (w / comparison_scale)^2
+                if comparison_left >= comparison_right
                     s = 1
                 elseif abs(A[r, r]) >= alpha * rmax
                     if r != k
@@ -651,12 +881,19 @@ function _ldlt!(::GenericBackend, A::AbstractMatrix{BigFloat}, p::Int)
                 e = A[k + 1, k]
                 d11 = A[k, k]
                 d22 = A[k + 1, k + 1]
-                det = d11 * d22 - e * e
-                det == 0 && return k, perm, blocks
+                _ldlt_2x2_normalize_rows!(
+                    norm_a, norm_e1, norm_e2, norm_c, norm_det,
+                    norm_r1, norm_r2, norm_y1, norm_y2, d11, e, d22,
+                ) || return k, perm, blocks
                 for i in (k + 2):n
-                    a1 = A[i, k]; a2 = A[i, k + 1]
-                    A[i, k] = (d22 * a1 - e * a2) / det
-                    A[i, k + 1] = (-e * a1 + d11 * a2) / det
+                    MA.operate_to!(y1copy, copy, A[i, k])
+                    MA.operate_to!(y2copy, copy, A[i, k + 1])
+                    _ldlt_2x2_solve_normalized!(
+                        A[i, k], A[i, k + 1],
+                        norm_a, norm_e1, norm_e2, norm_c, norm_det,
+                        norm_r1, norm_r2, y1copy, y2copy,
+                        norm_y1, norm_y2, norm_work,
+                    )
                     MA.operate_to!(A[k, i], copy, A[i, k])
                     MA.operate_to!(A[k + 1, i], copy, A[i, k + 1])
                 end

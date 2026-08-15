@@ -22,5 +22,7 @@ include("test_utils.jl")
     include("qr.jl")
     include("quality.jl")
     include("lu.jl")
+    include("repeated_solve.jl")
+    include("numerical_robustness.jl")
     include("final_review_regressions.jl")
 end

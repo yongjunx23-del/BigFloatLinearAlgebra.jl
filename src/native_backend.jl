@@ -1191,14 +1191,16 @@ function _cholesky_solve!(
     triangle::Triangle,
     p::Int,
     rhs::AbstractVecOrMat{BigFloat},
+    workspace::Union{Nothing,BFLAWorkspace},
+    workspace_worker::Int,
 )
     triangle === Lower ||
         _unsupported(NativeBackend(), :factor_solve, "NativeBackend supports triangle=Lower only in phase 1")
     n = size(L, 1)
     n == 0 && return rhs
-    acc = _scratch(p)
-    buffer = _scratch(p)
-    difference = _scratch(p)
+    acc = _solve_scratch(workspace, workspace_worker, 1, p)
+    buffer = _solve_scratch(workspace, workspace_worker, 2, p)
+    difference = _solve_scratch(workspace, workspace_worker, 3, p)
     @inbounds for column in axes(rhs, 2)
         for row in 1:n
             MA.operate!(zero, acc)

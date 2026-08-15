@@ -154,29 +154,95 @@ function _lu_permutation(pivots::Vector{Int})
     return perm
 end
 
-function ldiv!(F::BFLALUFactor, rhs::AbstractVecOrMat{BigFloat})
+function _lu_ldiv!(
+    F::BFLALUFactor,
+    rhs::AbstractVecOrMat{BigFloat},
+    trusted::Bool,
+    workspace::Union{Nothing,BFLAWorkspace},
+    workspace_worker::Int,
+    operation::AbstractString,
+)
     issuccess(F) || throw(LinearAlgebra.SingularException(
         F.status.position === nothing ? 0 : F.status.position,
     ))
     n = size(F.factors, 1)
     size(rhs, 1) == n || throw(DimensionMismatch(
-        "ldiv!: right-hand side dimensions differ",
+        "$operation: right-hand side dimensions differ",
     ))
-    _require_no_alias(rhs, F.factors, "ldiv!")
-    _validate_factor_precision(F, "ldiv!", rhs)
-    (_all_finite(F.factors) && _all_finite(rhs)) || throw(DomainError(
-        (F, rhs), "ldiv!: factor and right-hand side must be finite",
-    ))
-    _lu_solve!(F.backend, F.factors, F.pivots, F.precision_bits, rhs)
+    _require_no_alias(rhs, F.factors, operation)
+    if trusted
+        _validate_trusted_rhs_precision(F, operation, rhs)
+    else
+        _validate_factor_precision(F, operation, rhs)
+        _all_finite(F.factors) || throw(DomainError(
+            F, "$operation: factor storage contains non-finite entries",
+        ))
+    end
     _all_finite(rhs) || throw(DomainError(
-        rhs, "ldiv!: solve produced non-finite entries",
+        rhs, "$operation: right-hand side contains non-finite entries",
+    ))
+    _validate_solve_workspace(
+        workspace, workspace_worker, F.precision_bits, operation,
+    )
+    _lu_solve!(
+        F.backend,
+        F.factors,
+        F.pivots,
+        F.precision_bits,
+        rhs,
+        workspace,
+        workspace_worker,
+    )
+    _all_finite(rhs) || throw(DomainError(
+        rhs, "$operation: solve produced non-finite entries",
     ))
     return rhs
 end
 
-solve!(F::BFLALUFactor, rhs::AbstractVecOrMat{BigFloat}) = ldiv!(F, rhs)
-solve(F::BFLALUFactor, rhs::AbstractVecOrMat{BigFloat}) =
-    ldiv!(F, owned_copy(rhs))
+function ldiv!(
+    F::BFLALUFactor,
+    rhs::AbstractVecOrMat{BigFloat};
+    workspace::Union{Nothing,BFLAWorkspace}=nothing,
+    workspace_worker::Int=1,
+)
+    return _lu_ldiv!(F, rhs, false, workspace, workspace_worker, "ldiv!")
+end
+
+function ldiv_trusted!(
+    F::BFLALUFactor,
+    rhs::AbstractVecOrMat{BigFloat};
+    workspace::Union{Nothing,BFLAWorkspace}=nothing,
+    workspace_worker::Int=1,
+)
+    return _lu_ldiv!(
+        F, rhs, true, workspace, workspace_worker, "ldiv_trusted!",
+    )
+end
+
+function solve!(
+    F::BFLALUFactor,
+    rhs::AbstractVecOrMat{BigFloat};
+    workspace::Union{Nothing,BFLAWorkspace}=nothing,
+    workspace_worker::Int=1,
+)
+    return ldiv!(
+        F, rhs; workspace=workspace, workspace_worker=workspace_worker,
+    )
+end
+
+function solve(
+    F::BFLALUFactor,
+    rhs::AbstractVecOrMat{BigFloat};
+    workspace::Union{Nothing,BFLAWorkspace}=nothing,
+    workspace_worker::Int=1,
+)
+    return ldiv!(
+        F,
+        owned_copy(rhs);
+        workspace=workspace,
+        workspace_worker=workspace_worker,
+    )
+end
 
 function _lu_abs_to!(destination::BigFloat, source::BigFloat)
     MA.operate_to!(destination, copy, source)
@@ -231,10 +297,12 @@ function _lu_solve!(
     pivots::Vector{Int},
     p::Int,
     rhs::AbstractVecOrMat{BigFloat},
+    workspace::Union{Nothing,BFLAWorkspace},
+    workspace_worker::Int,
 )
     n = size(A, 1)
     R = reshape(rhs, n, :)
-    product = BigFloat(0; precision = p)
+    product = _solve_scratch(workspace, workspace_worker, 1, p)
     @inbounds for column in axes(R, 2)
         for k in 1:n
             pivot = pivots[k]
@@ -263,6 +331,8 @@ function _lu_solve!(
     pivots::Vector{Int},
     p::Int,
     rhs::AbstractVecOrMat{BigFloat},
+    ::Union{Nothing,BFLAWorkspace},
+    ::Int,
 )
     return _with_precision(p) do
         F = LinearAlgebra.LU(A, pivots, 0)

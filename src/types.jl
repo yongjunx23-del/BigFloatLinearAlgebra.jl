@@ -80,7 +80,8 @@ backend-specific; `cholesky_triangles` enumerates the authoritative triangles
 the backend can factor, because `NativeBackend` supports lower-triangular
 Cholesky only while `GenericBackend` supports both lower and upper.
 `cholesky_workspace` reports support for the explicit ownership-scan workspace
-contract; it never implies an alternate numerical kernel or fallback.
+contract. `factor_solve_workspace` reports support for caller-owned repeated
+solve scratch. Neither capability implies an alternate kernel or fallback.
 """
 function capabilities end
 
@@ -111,6 +112,7 @@ capabilities(::NativeBackend) = (
     refinement = true,
     precision_conversion = true,
     factor_solve = true,
+    factor_solve_workspace = true,
     threading = true,
     ownership_safe = true,
 )
@@ -142,6 +144,7 @@ capabilities(::GenericBackend) = (
     refinement = true,
     precision_conversion = true,
     factor_solve = true,
+    factor_solve_workspace = true,
     threading = false,
     ownership_safe = true,
 )

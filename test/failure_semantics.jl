@@ -47,6 +47,10 @@ struct FactorProbeBackend <: BFLA.AbstractBFLABackend end
             cholesky_probe, cholesky_rhs,
         )
         @test cholesky_rhs == cholesky_snapshot
+        @test_throws BFLA.UnsupportedOperation BFLA.ldiv_trusted!(
+            cholesky_probe, cholesky_rhs,
+        )
+        @test cholesky_rhs == cholesky_snapshot
 
         A = BFLA.owned_zeros(BigFloat, 2, 2; precision_bits = p)
         A[1, 1] = BigFloat(2; precision = p)
@@ -64,6 +68,10 @@ struct FactorProbeBackend <: BFLA.AbstractBFLABackend end
         ldlt_rhs = random_vector(2, p, MersenneTwister(5102))
         ldlt_snapshot = BFLA.owned_copy(ldlt_rhs)
         @test_throws BFLA.UnsupportedOperation BFLA.solve!(ldlt_probe, ldlt_rhs)
+        @test ldlt_rhs == ldlt_snapshot
+        @test_throws BFLA.UnsupportedOperation BFLA.ldiv_trusted!(
+            ldlt_probe, ldlt_rhs,
+        )
         @test ldlt_rhs == ldlt_snapshot
 
         Qsource = random_matrix(4, 2, p, MersenneTwister(5103))
@@ -91,6 +99,10 @@ struct FactorProbeBackend <: BFLA.AbstractBFLABackend end
         qr_snapshot = BFLA.owned_copy(qr_rhs)
         @test_throws BFLA.UnsupportedOperation BFLA.solve!(qr_probe, qr_rhs)
         @test qr_rhs == qr_snapshot
+        @test_throws BFLA.UnsupportedOperation BFLA.ldiv_trusted!(
+            qr_probe, qr_rhs,
+        )
+        @test qr_rhs == qr_snapshot
 
         lu_source = BFLA.owned_zeros(BigFloat, 3, 3; precision_bits = p)
         lu_source[1, 1] = BigFloat(2; precision = p)
@@ -110,6 +122,10 @@ struct FactorProbeBackend <: BFLA.AbstractBFLABackend end
         lu_rhs = random_vector(3, p, MersenneTwister(5107))
         lu_snapshot = BFLA.owned_copy(lu_rhs)
         @test_throws BFLA.UnsupportedOperation BFLA.solve!(lu_probe, lu_rhs)
+        @test lu_rhs == lu_snapshot
+        @test_throws BFLA.UnsupportedOperation BFLA.ldiv_trusted!(
+            lu_probe, lu_rhs,
+        )
         @test lu_rhs == lu_snapshot
     end
 
@@ -177,6 +193,7 @@ struct FactorProbeBackend <: BFLA.AbstractBFLABackend end
         @test caps.trmm && caps.cholesky && caps.ldlt && caps.lu
         @test caps.cholesky_workspace
         @test caps.rank_revealing_qr && caps.factor_solve
+        @test caps.factor_solve_workspace
         @test !caps.unpivoted_qr
         @test caps.qr_pivoting === :column
         @test caps.least_squares_solve && caps.vector_solve && caps.multi_rhs
@@ -188,6 +205,7 @@ struct FactorProbeBackend <: BFLA.AbstractBFLABackend end
         @test gcaps.trmm && gcaps.cholesky && gcaps.ldlt && gcaps.lu
         @test gcaps.cholesky_workspace
         @test gcaps.rank_revealing_qr && gcaps.factor_solve
+        @test gcaps.factor_solve_workspace
         @test !gcaps.unpivoted_qr
         @test gcaps.qr_pivoting === :column
         @test gcaps.least_squares_solve && gcaps.vector_solve && gcaps.multi_rhs
