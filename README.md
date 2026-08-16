@@ -1,45 +1,21 @@
 # BigFloatLinearAlgebra.jl
 
-BigFloatLinearAlgebra (BFLA) is an independent, ownership-safe dense linear
-algebra library for Julia `BigFloat` / MPFR. It provides BLAS Level 1-3 kernels,
-symmetric kernels, Cholesky, symmetric-indefinite LDLT, column-pivoted QR, and
-partial-pivoting LU with two auditable backends.
+`BigFloatLinearAlgebra.jl` (BFLA) is a dense linear-algebra library for Julia
+`BigFloat` / MPFR. It provides ownership-safe storage, explicit precision,
+BLAS-like kernels, and dense factorizations without depending on an
+optimization solver.
 
-It is not part of SDPX and does not depend on it. SDPX is simply the first
-production consumer; the public API contains no solver concepts (KKT, Schur,
-cone, certificate, LP, SDP).
+The default `NativeBackend()` uses specialized MPFR-aware kernels.
+`GenericBackend()` provides a reference path based on Julia's generic
+`LinearAlgebra` algorithms.
 
-## Design highlights
+## Installation
 
-- **Explicit backends.** Every kernel takes a `NativeBackend()` (default,
-  MPFR-native) or `GenericBackend()` (reference, built on `LinearAlgebra`)
-  as its first argument. `capabilities(backend)` is an audit hook.
-- **Ownership-safe storage.** `BigFloat` is mutable, so `zeros(BigFloat, ...)`
-  aliases one MPFR object across every slot. BFLA's `owned_zeros`,
-  `owned_copy`, `convert_owned!`, `copy_owned!`, `zero_owned!`, and
-  `fill_owned!` guarantee or preserve independent MPFR objects.
-- **Explicit precision.** Storage and scratch are created at a traceable bit
-  precision; the Native backend never inherits Julia's ambient
-  `setprecision`. Mixed-precision operands fail closed.
-- **No silent fallback.** A backend either supports an operation or throws
-  `UnsupportedOperation`. Failures are never faked as success.
-- **Stable factor protocol.** Cholesky, LDLT, RRQR, and LU expose common
-  backend/precision/status/failure/diagnostic accessors, so consumers do not
-  inspect concrete factor fields.
-- **Explicit trusted reuse.** The fully checked `ldiv!` remains the safe
-  boundary. Callers that control a factor's lifetime can opt into
-  `ldiv_trusted!`, which retains status, dimension, RHS, precision, alias, and
-  backend checks while avoiding a repeated full factor-storage scan.
-- **Caller-owned solve workspace.** Cholesky, LDLT, RRQR, and LU solves accept
-  precision-matched worker-local scratch. LDLT and RRQR reuse flat buffers
-  across vector and multi-RHS solves without process-global mutable state.
-
-See [docs/src](docs/src) for the frozen backend/ownership/precision contracts.
-
-## Install
+Until the package is registered in Julia General:
 
 ```julia
-import Pkg; Pkg.add(url="https://github.com/yongjunx23-del/BigFloatLinearAlgebra.jl")
+using Pkg
+Pkg.add(url = "https://github.com/yongjunx23-del/BigFloatLinearAlgebra.jl")
 ```
 
 ## Quick start
@@ -48,86 +24,112 @@ import Pkg; Pkg.add(url="https://github.com/yongjunx23-del/BigFloatLinearAlgebra
 using BigFloatLinearAlgebra
 
 p = 256
-A = owned_zeros(BigFloat, 4, 4; precision_bits = p)
-fill_owned!(A, BigFloat(1; precision = p))
-for i in 1:4
-    A[i, i] = BigFloat(10; precision = p)
-end
-
 backend = NativeBackend()
-C = owned_zeros(BigFloat, 4, 4; precision_bits = p)
-gemm!(backend, Trans, NoTrans, BigFloat(1; precision = p), A, A,
-      BigFloat(0; precision = p), C)
 
-factor = cholesky(backend, C)
-b = owned_zeros(BigFloat, 4; precision_bits = p)
+A = owned_zeros(BigFloat, 2, 2; precision_bits = p)
+A[1, 1] = BigFloat(4; precision = p)
+A[1, 2] = BigFloat(1; precision = p)
+A[2, 1] = BigFloat(1; precision = p)
+A[2, 2] = BigFloat(3; precision = p)
+
+b = owned_zeros(BigFloat, 2; precision_bits = p)
 b[1] = BigFloat(1; precision = p)
-solve!(factor, b)
+b[2] = BigFloat(2; precision = p)
+
+F = cholesky(backend, A)
+x = solve(F, b)
 ```
 
-## Public API
+## Main features
 
-- Storage: `owned_zeros`, `owned_similar`, `owned_copy`, `convert_owned!`,
-  `copy_owned!`, `zero_owned!`, `fill_owned!`.
-- Level 1: `scal!`, `axpy!`, `axpby!`, `dot`, `norminf`.
-- Level 2: `gemv!`, `trsv!`, `syr!`, `symv!`.
-- Level 3: `gemm!`, `syrk!`, `gemmt!`, `syr2k!`, `trmm!`, `trsm!`.
-- Factor solve: checked `ldiv!`, explicit `ldiv_trusted!`, `solve!`, and
-  allocating `solve`.
-- Cholesky: `try_cholesky!`, `cholesky!`, `cholesky`.
-- Common factor metadata: `factor_matrix`, `factor_backend`,
-  `factor_precision`, `factor_status`, `factor_kind`, `factor_triangle`,
-  `factor_failure_position`, `factor_diagnostics`, `issuccess`.
-- LDLT: `try_ldlt!`, `ldlt!`, `ldlt`, pivot/inertia diagnostics, and solve.
-- QR: `qr!`, `qr`, `applyQ!`, rank/permutation/R-diagonal diagnostics, and
-  overdetermined solve.
-- LU: `try_lu!`, `lu!`, `lu`, pivot/permutation diagnostics, and
-  vector/multi-RHS solve.
-- Numerical quality: caller-owned `residual!` and normwise backward-error
-  measurement for vector and multi-RHS systems, plus explicit higher-precision
-  residual diagnostics and the correction-only `refinement_correction!`.
+- ownership-safe `BigFloat` arrays with explicit precision;
+- Level 1-3 BLAS-like kernels;
+- symmetric kernels and authoritative-triangle operations;
+- Cholesky, symmetric-indefinite LDLT, column-pivoted QR, and LU;
+- vector and multi-RHS solves;
+- stable factor metadata and diagnostics;
+- residual, backward-error, higher-precision residual, and refinement tools;
+- caller-owned reusable solve workspace;
+- explicit `NativeBackend()` and `GenericBackend()` selection;
+- no silent backend fallback.
 
-Only real `BigFloat` is supported in this phase.
+Only real `BigFloat` is supported in the current release.
 
-## Backends
+## Performance
 
-| capability | Native | Generic |
-| --- | --- | --- |
-| GEMM/GEMV/SYRK | yes | yes |
-| TRSM/TRSV/TRMM | yes | yes |
-| Cholesky | lower only; ownership workspace | lower and upper; ownership workspace |
-| LDLT / RRQR / LU | yes | yes |
-| residual / backward error | yes | yes |
-| higher-precision residual / refinement | yes | yes |
-| factor solve / caller workspace | yes | yes |
-| threading | explicit 1+ workers | single (serialized) |
-| ownership safe | yes | yes |
+The table below compares `NativeBackend()` with `GenericBackend()`, whose
+reference implementation uses Julia's generic `LinearAlgebra` path. The
+measurements are correctness-gated warm medians at `n = 128` on Apple M4/macOS
+with Julia 1.12.6. Values are speedups (`Generic / Native`), so larger is
+better.
 
-`NativeBackend` is extracted from the SDPX legacy BigFloat dense kernels and
-keeps their reduction order and MPFR ownership discipline; see
-`THIRD_PARTY_NOTICES.md`. `GenericBackend` uses `LinearAlgebra` generic methods
-inside a scoped, lock-guarded precision context.
+| Workload | 128-bit | 256-bit | 512-bit |
+|---|---:|---:|---:|
+| SYRK → Cholesky | 3.43x | 2.60x | 2.28x |
+| Cholesky → 3 solves | 2.66x | 2.18x | 2.13x |
+| TRSM → Gram → RRQR | 3.03x | 2.61x | 2.42x |
+| LDLT → multi-RHS | 6.06x | 6.36x | 6.39x |
 
-## Testing and benchmarking
+These results are machine- and workload-dependent, not portable performance
+guarantees. Full timings, allocation data, correctness gates, and methodology
+are in
+[`benchmark/results/2026-08-13-round-c.md`](benchmark/results/2026-08-13-round-c.md).
+
+## Precision and ownership
+
+`BigFloat` values are mutable. BFLA therefore provides constructors and copy
+operations that keep array entries independently owned and tracks the intended
+bit precision explicitly.
 
 ```julia
-julia --project=. -t 1 test/runtests.jl
-julia --project=. -t 4 test/runtests.jl
-julia --project=. benchmark/run_production_cycles.jl
-julia --project=. benchmark/run_standalone.jl
-julia --project=. benchmark/run_repeated_solves.jl
+A = owned_zeros(BigFloat, 100, 100; precision_bits = 256)
+B = owned_copy(A)
 ```
 
-The unit suite covers ownership, numerical correctness (Native vs. Generic vs.
-a `2p`-bit oracle), factorizations, residual/refinement, failure semantics,
-precision, and concurrency. Benchmark runners report cold/warm timing,
-median/IQR/min/max, allocations, effective threads, block size, and RSS only
-after correctness gates. `benchmark/compare_sdpx_legacy.jl` and
-`benchmark/compare_sdpx_legacy_timing.jl` are opt-in parity/A-B checks; SDPX is
-never a required test dependency. A representative local report is in
-[`benchmark/results/2026-08-13-round-c.md`](benchmark/results/2026-08-13-round-c.md).
+The Native backend does not silently switch to another backend when an
+operation is unsupported. Precision mismatches and unsupported operations fail
+explicitly.
+
+## Factor API
+
+Cholesky, LDLT, QR, and LU share common public metadata such as:
+
+```text
+issuccess
+factor_matrix
+factor_backend
+factor_precision
+factor_status
+factor_kind
+factor_diagnostics
+numerical_rank
+ldiv!
+solve
+```
+
+See [`docs/src`](docs/src) for the detailed ownership, precision, workspace, and
+factor contracts.
+
+## Testing
+
+```julia
+using Pkg
+Pkg.test("BigFloatLinearAlgebra")
+```
+
+CI currently tests Julia 1.10, 1.11, and 1.12 with one- and four-thread runs.
+
+## Contributors and AI disclosure
+
+- **Yongjun Xu** — maintainer; design, implementation, numerical validation,
+  benchmarking, and review.
+- **OpenAI Codex** — substantial implementation, refactoring, testing, and
+  documentation assistance under human review.
+
+The Native backend also contains code extracted and generalized from the
+MIT-licensed SDPX.jl BigFloat kernels. Provenance and third-party attribution
+are documented in [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).
 
 ## License
 
-MIT. The Native backend derives from SDPX's MIT-licensed BigFloat kernels; see
-`THIRD_PARTY_NOTICES.md`.
+MIT. See [`LICENSE`](LICENSE).
