@@ -455,3 +455,33 @@ end
         @test isfinite(_backward_error(A, x, b, p))
     end
 end
+
+@testset "metadata accessors are invalid after invalidate!/failure" begin
+    p = 256
+    n = 8
+    rng = MersenneTwister(77)
+    A = _square_fixture(n, p, rng)
+    b = owned_zeros(BigFloat, n; precision_bits = p)
+    for i in 1:n
+        b[i] = BigFloat(i; precision = p)
+    end
+    c = BFLALUCache(NativeBackend())
+    prepare!(c, n, p)
+    factorize!(c, A)
+    @test issuccess(c)
+    @test factor_perm(c) == factor_perm(c)
+    @test haskey(factor_diagnostics(c), :permutation)
+    # after invalidate!: metadata accessors must throw, not return stale values
+    invalidate!(c)
+    @test_throws ArgumentError factor_perm(c)
+    @test_throws ArgumentError factor_diagnostics(c)
+    # after a non-finite input, status is nonfinite and metadata accessors throw
+    factorize!(c, A)
+    Anan = owned_copy(A)
+    Anan[1, 1] = BigFloat(NaN; precision = p)
+    factorize!(c, Anan)
+    @test !issuccess(c)
+    @test factor_status(c).kind == :nonfinite
+    @test_throws ArgumentError factor_perm(c)
+    @test_throws ArgumentError factor_diagnostics(c)
+end

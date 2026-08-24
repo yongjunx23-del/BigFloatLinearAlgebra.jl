@@ -582,7 +582,10 @@ end
 factor_kind(::BFLALUCache) = :lu
 factor_matrix(cache::BFLALUCache) = cache.factors
 factor_pivots(cache::BFLALUCache) = copy(cache.pivots)
-factor_perm(cache::BFLALUCache) = copy(cache.perm)
+function factor_perm(cache::BFLALUCache)
+    _cache_require_success(cache, "factor_perm")
+    return copy(cache.perm)
+end
 
 function prepare!(
     cache::BFLALUCache,
@@ -791,8 +794,14 @@ end
 factor_kind(::BFLALDLTCache) = :ldlt
 factor_triangle(::BFLALDLTCache) = Lower
 factor_matrix(cache::BFLALDLTCache) = cache.factors
-factor_perm(cache::BFLALDLTCache) = copy(cache.perm)
-factor_blocks(cache::BFLALDLTCache) = copy(cache.blocks)
+function factor_perm(cache::BFLALDLTCache)
+    _cache_require_success(cache, "factor_perm")
+    return copy(cache.perm)
+end
+function factor_blocks(cache::BFLALDLTCache)
+    _cache_require_success(cache, "factor_blocks")
+    return copy(cache.blocks)
+end
 
 """
     factor_inertia(cache::BFLALDLTCache) -> (npos, nneg, nzero)
@@ -964,8 +973,14 @@ end
 
 factor_kind(::BFLARRQRCache) = :rrqr
 factor_matrix(cache::BFLARRQRCache) = cache.factors
-factor_jpvt(cache::BFLARRQRCache) = copy(cache.jpvt)
-factor_rank(cache::BFLARRQRCache) = cache.rank
+function factor_jpvt(cache::BFLARRQRCache)
+    _cache_require_success(cache, "factor_jpvt")
+    return copy(cache.jpvt)
+end
+function factor_rank(cache::BFLARRQRCache)
+    _cache_require_success(cache, "factor_rank")
+    return cache.rank
+end
 
 function factor_Rdiag(cache::BFLARRQRCache)
     _cache_require_success(cache, "factor_Rdiag")
@@ -1110,6 +1125,7 @@ function factor_diagnostics(cache::BFLACholeskyCache)
 end
 
 function factor_diagnostics(cache::BFLALUCache)
+    _cache_require_success(cache, "factor_diagnostics")
     return (
         factor_kind = factor_kind(cache),
         row_swap_count = count(k -> cache.pivots[k] != k, eachindex(cache.pivots)),
@@ -1119,7 +1135,8 @@ function factor_diagnostics(cache::BFLALUCache)
 end
 
 function factor_diagnostics(cache::BFLALDLTCache)
-    inertia = issuccess(cache) ? _factor_inertia_unchecked(cache) : nothing
+    _cache_require_success(cache, "factor_diagnostics")
+    inertia = _factor_inertia_unchecked(cache)
     return (
         factor_kind = factor_kind(cache),
         inertia = inertia,
@@ -1130,6 +1147,7 @@ function factor_diagnostics(cache::BFLALDLTCache)
 end
 
 function factor_diagnostics(cache::BFLARRQRCache)
+    _cache_require_success(cache, "factor_diagnostics")
     return (
         factor_kind = factor_kind(cache),
         rank = cache.rank,
