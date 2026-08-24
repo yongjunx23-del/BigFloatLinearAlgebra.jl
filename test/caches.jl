@@ -76,6 +76,26 @@ function _backward_error(A, x, b, p)
     return normwise_backward_error(NativeBackend(), NoTrans, A, x, b, residual)
 end
 
+
+# Local cross-backend closeness check at explicit precision.
+function _cross_close(A, B, p; dimension::Int = length(A))
+    maximum_value = BigFloat(0; precision = p)
+    difference = BigFloat(0; precision = p)
+    @inbounds for index in eachindex(A, B)
+        MA.operate_to!(difference, -, A[index], B[index])
+        signbit(difference) && MA.operate!(-, difference)
+        difference > maximum_value &&
+            MA.operate_to!(maximum_value, copy, difference)
+    end
+    scale = BigFloat(1; precision = p)
+    for value in A
+        abs(value) > scale && MA.operate_to!(scale, abs, value)
+    end
+    bound = BigFloat(100 * max(dimension, 1); precision = p) * _eps_p(p) * scale
+    return maximum_value <= bound
+end
+
+
 # Unit roundoff at the explicit working precision (never ambient).
 _eps_p(p) = BigFloat(2; precision = p) ^ (1 - p)
 
@@ -206,4 +226,82 @@ end
     report = refine_once!(c, A, x, b)
     @test haskey(report, :backward_error_after)
     @test isfinite(report.backward_error_after)
+end
+
+@testset "cache zero-allocation hot path" begin
+    p = 256
+    n = 32
+    rng = MersenneTwister(9)
+    A = _square_fixture(n, p, rng)
+    b = owned_zeros(BigFloat, n; precision_bits = p)
+    for i in 1:n
+        b[i] = BigFloat(i; precision = p)
+    end
+    x = owned_zeros(BigFloat, n; precision_bits = p)
+
+    # LU: repeated factorize + solve must not allocate after warm-up.
+    c = BFLALUCache(NativeBackend())
+    prepare!(c, n, p)
+    factorize!(c, A)
+    for _ in 1:20
+        factorize!(c, A)
+    end
+    solve!(x, c, b)
+    for _ in 1:5
+        solve!(x, c, b)
+    end
+    @test @allocated(solve!(x, c, b)) == 0
+    @test @allocated(factorize!(c, A)) == 0
+    @test @allocated(begin factorize!(c, A); solve!(x, c, b); end) == 0
+
+    # Cholesky: same contract.
+    Aspd = _spd_fixture(n, p, rng)
+    cc = BFLACholeskyCache(NativeBackend())
+    prepare!(cc, n, p)
+    factorize!(cc, Aspd)
+    for _ in 1:5
+        factorize!(cc, Aspd)
+    end
+    solve!(x, cc, b)
+    for _ in 1:5
+        solve!(x, cc, b)
+    end
+    @test @allocated(solve!(x, cc, b)) == 0
+    @test @allocated(factorize!(cc, Aspd)) == 0
+end
+
+@testset "cache Native/Generic numerical cross-check" begin
+    for (p, n) in ((128, 8), (256, 16))
+        rng = MersenneTwister(17 + p)
+        for (ctor, kind) in (
+            (BFLACholeskyCache, :cholesky),
+            (BFLALUCache, :lu),
+            (BFLALDLTCache, :ldlt),
+            (BFLARRQRCache, :rrqr),
+        )
+            A = kind == :cholesky ? _spd_fixture(n, p, rng) :
+                kind == :ldlt ? _indefinite_fixture(n, p, rng) :
+                _square_fixture(n, p, rng)
+            x_true = owned_zeros(BigFloat, n; precision_bits = p)
+            for i in 1:n
+                x_true[i] = BigFloat(rand(rng, -1024:1024); precision = p)
+            end
+            b = _rhs(A, x_true, p)
+
+            cn = ctor(NativeBackend())
+            prepare!(cn, n, p)
+            factorize!(cn, A)
+            @test issuccess(cn)
+            x_n = owned_zeros(BigFloat, n; precision_bits = p)
+            solve!(x_n, cn, b)
+
+            cg = ctor(GenericBackend())
+            prepare!(cg, n, p)
+            factorize!(cg, A)
+            x_g = owned_zeros(BigFloat, n; precision_bits = p)
+            solve!(x_g, cg, b)
+            @test _cross_close(x_n, x_g, p; dimension = n)
+            @test _backward_error(A, x_n, b, p) <= BigFloat(100; precision = p) * _eps_p(p)
+        end
+    end
 end
