@@ -485,3 +485,34 @@ end
     @test_throws ArgumentError factor_perm(c)
     @test_throws ArgumentError factor_diagnostics(c)
 end
+
+@testset "refinement allocation contract is honest" begin
+    # refine_once! is allocation-light, NOT zero-allocation: it still builds fresh
+    # BigFloat constants/scratch via the generic residual!/normwise_backward_error
+    # path. We assert a bound (not == 0) so a regression that balloons allocation
+    # is caught while the honest contract is recorded.
+    p = 256
+    n = 16
+    rng = MersenneTwister(31337)
+    A = _spd_fixture(n, p, rng)
+    b = owned_zeros(BigFloat, n; precision_bits = p)
+    for i in 1:n
+        b[i] = BigFloat(rand(rng, -1024:1024); precision = p)
+    end
+    c = BFLACholeskyCache(NativeBackend())
+    prepare!(c, n, p; nrhs = 1)
+    prepare_refinement!(c, b)
+    factorize!(c, A)
+    x = owned_zeros(BigFloat, n; precision_bits = p)
+    solve_trusted!(x, c, b)
+    for _ in 1:20
+        refine_once!(c, A, x, b)
+    end
+    alloc = @allocated refine_once!(c, A, x, b)
+    @test alloc >= 0
+    @test alloc < 20000  # allocation-light bound; refinement is NOT zero-alloc
+    # storage object identity is preserved across refine_once!
+    storage_before = c.refine
+    refine_once!(c, A, x, b)
+    @test c.refine === storage_before
+end

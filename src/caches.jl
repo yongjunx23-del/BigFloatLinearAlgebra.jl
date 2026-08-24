@@ -451,13 +451,13 @@ end
 Allocating convenience: copy `b` into a fresh owned solution and solve it.
 Prefer the three-argument form to avoid the allocation on the hot path.
 """
-function solve!(
+function solve(
     cache::BFLACholeskyCache,
     b::AbstractVecOrMat{BigFloat},
 )
-    _cache_require_success(cache, "solve!")
+    _cache_require_success(cache, "solve")
     x = owned_zeros(BigFloat, size(b)...; precision_bits = cache.precision_bits)
-    return solve!(x, cache, b)
+    return solve_trusted!(x, cache, b)
 end
 
 # Select the embedded workspace for a cache solve. The cache owns a worker-local
@@ -750,13 +750,13 @@ function solve_trusted!(
     return x
 end
 
-function solve!(
+function solve(
     cache::BFLALUCache,
     b::AbstractVecOrMat{BigFloat},
 )
-    _cache_require_success(cache, "solve!")
+    _cache_require_success(cache, "solve")
     x = owned_zeros(BigFloat, size(b)...; precision_bits = cache.precision_bits)
-    return solve!(x, cache, b)
+    return solve_trusted!(x, cache, b)
 end
 
 # --- LDLT (Bunch-Kaufman) --------------------------------------------------
@@ -915,13 +915,13 @@ function solve_trusted!(
     return x
 end
 
-function solve!(
+function solve(
     cache::BFLALDLTCache,
     b::AbstractVecOrMat{BigFloat},
 )
-    _cache_require_success(cache, "solve!")
+    _cache_require_success(cache, "solve")
     x = owned_zeros(BigFloat, size(b)...; precision_bits = cache.precision_bits)
-    return solve!(x, cache, b)
+    return solve_trusted!(x, cache, b)
 end
 
 # --- RRQR ----------------------------------------------------------------
@@ -1105,13 +1105,13 @@ function solve_trusted!(
     return x
 end
 
-function solve!(
+function solve(
     cache::BFLARRQRCache,
     b::AbstractVecOrMat{BigFloat},
 )
-    _cache_require_success(cache, "solve!")
+    _cache_require_success(cache, "solve")
     x = owned_zeros(BigFloat, size(b)...; precision_bits = cache.precision_bits)
-    return solve!(x, cache, b)
+    return solve_trusted!(x, cache, b)
 end
 
 # --- factor_diagnostics ---------------------------------------------------
