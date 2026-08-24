@@ -28,13 +28,14 @@ using SciMLBase
             @test cache.isfresh
             @test cache.A === A
             @test cache.b === b
-            @test cache.cacheval.factor === nothing
+            @test cache.cacheval.cache === nothing
             @test isconcretetype(typeof(cache.cacheval).parameters[1])
             sol = LinearSolve.solve!(cache)
             @test SciMLBase.successful_retcode(sol)
             @test !cache.isfresh
-            first_factor = cache.cacheval.factor
-            @test first_factor isa BFLA.BFLALUFactor
+            first_cache = cache.cacheval.cache
+            @test first_cache isa BFLA.BFLALUCache
+            @test BFLA.issuccess(first_cache)
             @test BFLA.norminf(Native, A * sol.u - b) <=
                 BigFloat(100; precision = p) * eps(BigFloat)
             @test A == A0
@@ -42,19 +43,23 @@ using SciMLBase
             @test is_independently_owned(sol.u)
             @test all(!(sol.u[i] === cache.b[i]) for i in eachindex(sol.u))
 
+            # RHS-only update reuses the factor cache object.
             cache.b = BFLA.owned_copy(b)
             cache.b[1] += BigFloat(1; precision = p)
             second_sol = LinearSolve.solve!(cache)
             @test SciMLBase.successful_retcode(second_sol)
-            @test cache.cacheval.factor === first_factor
+            @test cache.cacheval.cache === first_cache
 
+            # Matrix refresh re-factorizes into the *same* cache storage; the
+            # cache object identity is preserved (no factor deep-copy).
             A2 = BFLA.owned_copy(A)
             A2[1, 1] += BigFloat(1; precision = p)
             SciMLBase.reinit!(cache; A = A2)
             @test cache.isfresh
             LinearSolve.solve!(cache)
             @test !cache.isfresh
-            @test cache.cacheval.factor !== first_factor
+            @test cache.cacheval.cache === first_cache
+            @test BFLA.issuccess(cache.cacheval.cache)
 
             spd = BFLA.owned_zeros(BigFloat, 2, 2; precision_bits = p)
             spd[1, 1] = BigFloat(5; precision = p)
@@ -70,8 +75,8 @@ using SciMLBase
             )
             chol_sol = LinearSolve.solve!(chol_cache)
             @test SciMLBase.successful_retcode(chol_sol)
-            @test chol_cache.cacheval.factor isa BFLA.BFLACholeskyFactor
-            chol_factor = chol_cache.cacheval.factor
+            @test chol_cache.cacheval.cache isa BFLA.BFLACholeskyCache
+            chol_cache_obj = chol_cache.cacheval.cache
             @test spd == spd0
             @test rhs == rhs0
             @test is_independently_owned(chol_sol.u)
@@ -82,7 +87,7 @@ using SciMLBase
             chol_cache.b[2] += BigFloat(1; precision = p)
             second_chol_sol = LinearSolve.solve!(chol_cache)
             @test SciMLBase.successful_retcode(second_chol_sol)
-            @test chol_cache.cacheval.factor === chol_factor
+            @test chol_cache.cacheval.cache === chol_cache_obj
         end
     end
 
@@ -99,19 +104,20 @@ using SciMLBase
             sol = LinearSolve.solve!(cache)
             @test sol.retcode === SciMLBase.ReturnCode.Failure
             @test cache.isfresh
-            @test cache.cacheval.factor === nothing
+            @test cache.cacheval.cache !== nothing
+            @test !BFLA.issuccess(cache.cacheval.cache)
 
             good = BFLA.owned_copy(A)
             good[2, 2] = BigFloat(1; precision = p)
             SciMLBase.reinit!(cache; A = good)
             @test SciMLBase.successful_retcode(LinearSolve.solve!(cache))
-            @test cache.cacheval.factor isa BFLA.BFLALUFactor
+            @test BFLA.issuccess(cache.cacheval.cache)
 
             SciMLBase.reinit!(cache; A = A)
             failed_refactor = LinearSolve.solve!(cache)
             @test failed_refactor.retcode === SciMLBase.ReturnCode.Failure
             @test cache.isfresh
-            @test cache.cacheval.factor === nothing
+            @test !BFLA.issuccess(cache.cacheval.cache)
 
             indefinite = BFLA.owned_copy(good)
             indefinite[2, 2] = -BigFloat(1; precision = p)
@@ -122,7 +128,8 @@ using SciMLBase
             chol_failure = LinearSolve.solve!(chol_cache)
             @test chol_failure.retcode === SciMLBase.ReturnCode.Failure
             @test chol_cache.isfresh
-            @test chol_cache.cacheval.factor === nothing
+            @test chol_cache.cacheval.cache !== nothing
+            @test !BFLA.issuccess(chol_cache.cacheval.cache)
         end
     end
 
@@ -154,7 +161,7 @@ using SciMLBase
             sol2 = LinearSolve.solve!(cache)
             @test SciMLBase.successful_retcode(sol2)
             @test all(precision(value) == q for value in sol2.u)
-            @test BFLA.factor_precision(cache.cacheval.factor) == q
+            @test BFLA.factor_precision(cache.cacheval.cache) == q
         end
     end
 
@@ -181,27 +188,29 @@ using SciMLBase
             @test BFLA.norminf(Native, A * sol.u - rhs) <=
                 BigFloat(200; precision = p) * eps(BigFloat)
 
-            factor = cache.cacheval.factor
+            cache_obj = cache.cacheval.cache
+            # In-place mutation of A without refresh must not refactor.
             MA.operate!(+, A[1, 1], BigFloat(1; precision = p))
             @test !cache.isfresh
             LinearSolve.solve!(cache)
-            @test cache.cacheval.factor === factor
+            @test cache.cacheval.cache === cache_obj
 
+            # Explicit matrix refresh re-factorizes into the same cache storage.
             cache.A = A
             @test cache.isfresh
             refreshed = LinearSolve.solve!(cache)
             @test SciMLBase.successful_retcode(refreshed)
-            @test cache.cacheval.factor !== factor
+            @test cache.cacheval.cache === cache_obj
+            @test BFLA.issuccess(cache.cacheval.cache)
             @test BFLA.norminf(Native, A * refreshed.u - rhs) <=
                 BigFloat(200; precision = p) * eps(BigFloat)
 
-            refreshed_factor = cache.cacheval.factor
             MA.operate!(+, A[2, 2], BigFloat(1; precision = p))
             SciMLBase.reinit!(cache; A = A)
             @test cache.isfresh
             reinitialized = LinearSolve.solve!(cache)
             @test SciMLBase.successful_retcode(reinitialized)
-            @test cache.cacheval.factor !== refreshed_factor
+            @test cache.cacheval.cache === cache_obj
             @test BFLA.norminf(Native, A * reinitialized.u - rhs) <=
                 BigFloat(200; precision = p) * eps(BigFloat)
         end

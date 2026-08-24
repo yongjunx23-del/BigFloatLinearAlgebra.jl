@@ -27,6 +27,7 @@ include("lu.jl")
 include("quality.jl")
 include("generic_backend.jl")
 include("native_backend.jl")
+include("caches.jl")
 
 # These factories keep the optional LinearSolve integration discoverable from
 # the parent package without importing either weak dependency in the core.
@@ -126,6 +127,16 @@ export AbstractBFLABackend,
     FactorStatus,
     KernelConfig,
     BFLAWorkspace,
+    AbstractFactorCache,
+    BFLACholeskyCache,
+    BFLALUCache,
+    BFLALDLTCache,
+    BFLARRQRCache,
+    prepare!,
+    prepare_refinement!,
+    factorize!,
+    factor_prepared,
+    factor_size,
     workspace_precision,
     workspace_workers,
     workspace_scratch!,
@@ -199,9 +210,11 @@ export AbstractBFLABackend,
     higher_precision_residual!,
     refinement_correction!,
     refine_once!,
+    invalidate!,
     ldiv!,
     ldiv_trusted!,
     solve!,
+    solve_trusted!,
     solve
 
 end

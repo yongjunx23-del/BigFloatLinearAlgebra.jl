@@ -3,6 +3,51 @@
 All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Added
+
+- New public, precision-specific reusable factor-cache API:
+  `AbstractFactorCache`, `BFLACholeskyCache`, `BFLALUCache`, `BFLALDLTCache`,
+  and `BFLARRQRCache`, with `prepare!`, `factorize!`, `solve!`,
+  `solve_trusted!`, `refine_once!`, `prepare_refinement!`, `invalidate!`,
+  `factor_status`, `factor_precision`, `factor_prepared`, `factor_size`, and
+  metadata accessors (`factor_perm`, `factor_blocks`, `factor_inertia`,
+  `factor_rank`, `factor_jpvt`, `factor_diagnostics`).
+- A checked `solve!(x, cache, b)` (re-owns a shared/ambient-precision
+  destination safely) and a solver-facing `solve_trusted!(x, cache, b)` that is
+  the zero-allocation hot path for an already-owned destination.
+- Zero-Julia-allocation Native Cholesky and LU `factorize!`/`solve!`/full-cycle
+  hot paths after warm-up (verified across 128/256/512 bit and sizes 8/32/128).
+- LinearSolve.jl adapter rebuilt directly on the reusable factor cache: an
+  RHS-only solve allocates no new `BigFloat` element and a matrix refresh
+  re-factorizes into the same owned storage (no factor deep-copy). The adapter
+  re-verifies solution shape, precision, and array identity on every solve.
+- New documentation: factor-cache lifecycle, memory accounting (Julia vs native
+  allocation), and the SDPX provider contract.
+
+### Changed
+
+- LU cache factorization is dispatched on the backend type: a `GenericBackend`
+  cache executes the reference `_lu!` path, a `NativeBackend` cache the Native
+  kernel; `factor_backend(cache)` reflects the real execution path and there is
+  no implicit fallback.
+- `cache.perm` is rebuilt from step pivots after every LU `factorize!`, so
+  `factor_perm`/`factor_diagnostics` report the correct final permutation.
+- `prepare!(; nrhs)` now honors `nrhs` by eagerly allocating refinement scratch
+  via `prepare_refinement!`; `invalidate!` preserves reusable refinement
+  storage; the cache `refine_once!` no longer accepts a silently-ignored
+  `residual_precision` keyword (cache refinement is factor-precision-only).
+- Version is planned as **0.2.0** (new public API).
+
+### Known limitations
+
+- `BFLARRQRCache` is currently square-only (`n × n`); rectangular/overdetermined
+  systems use the allocating `qr!`.
+- LDLT and RRQR cache `factorize!` still allocate their pivot/`tau` metadata
+  (their solve paths are zero-allocation). This is reported honestly in the
+  memory-accounting documentation.
+
 ## [0.1.1] - 2026-08-25
 
 ### Added

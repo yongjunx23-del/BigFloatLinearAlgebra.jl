@@ -301,25 +301,26 @@ function _lu_solve!(
     workspace_worker::Int,
 )
     n = size(A, 1)
-    R = reshape(rhs, n, :)
+    nrhs = length(rhs) ÷ n
     product = _solve_scratch(workspace, workspace_worker, 1, p)
-    @inbounds for column in axes(R, 2)
+    @inbounds for column in 1:nrhs
+        base = (column - 1) * n
         for k in 1:n
             pivot = pivots[k]
-            R[k, column], R[pivot, column] = R[pivot, column], R[k, column]
+            rhs[base + k], rhs[base + pivot] = rhs[base + pivot], rhs[base + k]
         end
         for i in 1:n
             for k in 1:(i - 1)
-                MA.operate_to!(product, *, A[i, k], R[k, column])
-                MA.operate!(-, R[i, column], product)
+                MA.operate_to!(product, *, A[i, k], rhs[base + k])
+                MA.operate!(-, rhs[base + i], product)
             end
         end
         for i in n:-1:1
             for k in (i + 1):n
-                MA.operate_to!(product, *, A[i, k], R[k, column])
-                MA.operate!(-, R[i, column], product)
+                MA.operate_to!(product, *, A[i, k], rhs[base + k])
+                MA.operate!(-, rhs[base + i], product)
             end
-            _mpfr_div!(R[i, column], R[i, column], A[i, i])
+            _mpfr_div!(rhs[base + i], rhs[base + i], A[i, i])
         end
     end
     return rhs

@@ -451,20 +451,20 @@ end
 
 _apply_q!(
     ::NativeBackend,
-    F::BFLAQRFactor,
+    F,
     B::AbstractVecOrMat{BigFloat},
     trans::TransposeOp,
 ) = _apply_q_common!(F, B, trans)
 
 _apply_q!(
     ::GenericBackend,
-    F::BFLAQRFactor,
+    F,
     B::AbstractVecOrMat{BigFloat},
     trans::TransposeOp,
 ) = _apply_q_common!(F, B, trans)
 
 function _apply_q_common!(
-    F::BFLAQRFactor,
+    F,
     B::AbstractVecOrMat{BigFloat},
     trans::TransposeOp,
 )
@@ -562,7 +562,7 @@ end
 
 _qr_solve!(
     ::NativeBackend,
-    F::BFLAQRFactor,
+    F,
     rhs::AbstractVecOrMat{BigFloat},
     workspace::Union{Nothing,BFLAWorkspace},
     workspace_worker::Int,
@@ -570,14 +570,14 @@ _qr_solve!(
 
 _qr_solve!(
     ::GenericBackend,
-    F::BFLAQRFactor,
+    F,
     rhs::AbstractVecOrMat{BigFloat},
     workspace::Union{Nothing,BFLAWorkspace},
     workspace_worker::Int,
 ) = _qr_solve_common!(F, rhs, workspace, workspace_worker)
 
 function _qr_solve_common!(
-    F::BFLAQRFactor,
+    F,
     rhs::AbstractVecOrMat{BigFloat},
     workspace::Union{Nothing,BFLAWorkspace},
     workspace_worker::Int,
