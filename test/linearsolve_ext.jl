@@ -215,4 +215,47 @@ using SciMLBase
                 BigFloat(200; precision = p) * eps(BigFloat)
         end
     end
+
+    @testset "RHS shape lifecycle, factor identity, and failure recovery" begin
+        setprecision(BigFloat, 128) do
+            p = 128
+            n = 3
+            A = BFLA.owned_zeros(BigFloat, n, n; precision_bits = p)
+            for j in 1:n, i in 1:n
+                A[i, j] = BigFloat(i == j ? i + 3 : 1; precision = p)
+            end
+            bv = BFLA.owned_zeros(BigFloat, n; precision_bits = p)
+            for i in 1:n
+                bv[i] = BigFloat(i + 1; precision = p)
+            end
+            cache = LinearSolve.init(LinearSolve.LinearProblem(A, bv), BFLA.BigFloatLU())
+            sol = LinearSolve.solve!(cache)
+            @test SciMLBase.successful_retcode(sol)
+
+            # Matrix refresh preserves factor-matrix and element object identity.
+            cm = cache.cacheval.cache
+            fm_before = BFLA.factor_matrix(cm)
+            ids_before = objectid.(fm_before)
+            A2 = BFLA.owned_copy(A)
+            A2[1, 1] += BigFloat(1; precision = p)
+            SciMLBase.reinit!(cache; A = A2)
+            LinearSolve.solve!(cache)
+            @test BFLA.factor_matrix(cm) === fm_before
+            @test objectid.(fm_before) == ids_before
+
+            # Failure then recovery: singular -> Failure, then good -> Success.
+            As = BFLA.owned_copy(A)
+            for j in 1:n
+                As[2, j] = BigFloat(0; precision = p)
+            end
+            SciMLBase.reinit!(cache; A = As)
+            fsol = LinearSolve.solve!(cache)
+            @test fsol.retcode === SciMLBase.ReturnCode.Failure
+            SciMLBase.reinit!(cache; A = A2)
+            rsol = LinearSolve.solve!(cache)
+            @test SciMLBase.successful_retcode(rsol)
+            @test BFLA.factor_matrix(cm) === fm_before
+        end
+    end
+
 end

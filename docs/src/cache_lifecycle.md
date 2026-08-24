@@ -58,15 +58,19 @@ independent.
 
 1. **Precision or size change is explicit.** Changing `n` or the precision is a
    new `prepare!`; it never happens inside a hot loop.
-2. **No element replacement on the trusted hot path.** `factorize!`,
-   `solve_trusted!`, residual, and refinement write into the cache's existing
-   `BigFloat` objects. (The checked `solve!` intentionally re-owns.)
-3. **No metadata rebuild on repeated factorization.** Repeating `factorize!`
-   writes `pivots`/`perm`/`tau`/`jpvt` into preallocated arrays; it does not
-   create factor wrappers or identity vectors.
+2. **No element replacement on the trusted hot path.** `factorize!` and
+   `solve_trusted!` write into the cache's existing `BigFloat` objects. (The
+   checked `solve!` intentionally re-owns.) Refinement writes into its owned
+   scratch but still builds a few fresh scalars — it is allocation-light, not
+   zero-allocation.
+3. **Metadata reuse scope.** Cholesky and LU Native `factorize!` write
+   `pivots`/`perm` into the cache's preallocated arrays (no wrapper or identity
+   vector creation). LDLT and RRQR `factorize!` currently replace their
+   `perm`/`blocks`/`tau`/`jpvt` arrays with freshly-allocated ones, so their
+   factorization is *not* zero-allocation; their trusted solves are.
 4. **Zero Julia allocation after warm-up.** For the Native backend,
-   `factorize!` + `solve_trusted!` + residual for Cholesky and LU, and every
-   cached trusted solve, allocate 0 Julia bytes once the destination storage
+   `factorize!` + `solve_trusted!` for Cholesky and LU, and every cached trusted
+   solve, allocate 0 Julia bytes once the destination storage
    carries the cache precision and is independently owned.
 5. **No implicit `Float64` conversion and no silent fallback.** The Native
    backend never converts to `Float64` and never delegates to the Generic

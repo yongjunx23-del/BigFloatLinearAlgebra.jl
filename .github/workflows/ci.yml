@@ -51,6 +51,8 @@ jobs:
             scimlbase_version: "2.148.0"
           - linearsolve_version: "4.3.0"
             scimlbase_version: "3.33.0"
+          - linearsolve_version: "5"
+            scimlbase_version: "3"
     steps:
       - uses: actions/checkout@v4
       - uses: julia-actions/setup-julia@v2
@@ -73,4 +75,21 @@ jobs:
             ])
             include(joinpath(pwd(), "test", "test_utils.jl"))
             include(joinpath(pwd(), "test", "linearsolve_ext.jl"))
+          '
+
+  docs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: julia-actions/setup-julia@v2
+        with:
+          version: "1.10"
+      - uses: julia-actions/cache@v2
+      - name: Build and check docs
+        run: |
+          julia --startup-file=no --project=docs -e '
+            import Pkg
+            Pkg.develop(path=".")
+            Pkg.instantiate()
+            include("docs/make.jl")
           '

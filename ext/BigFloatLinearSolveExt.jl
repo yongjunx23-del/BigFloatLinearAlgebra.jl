@@ -14,6 +14,12 @@ matrix is owned by the cache and reused across right-hand-side-only updates
 until LinearSolve marks the cache fresh again. After mutating `A` in place,
 assign it back to `cache.A` or call `reinit!(cache; A = A)` so the cache
 re-factorizes into the *same* owned storage (no factor deep-copy).
+
+**RHS-shape lifecycle:** within one cache lifetime the RHS container dimension
+and column count are fixed (LinearSolve sizes `cache.u` once). RHS *values* may
+be updated, and `A` may be refreshed, but changing the RHS shape or column count
+(e.g. vector → matrix) or the precision requires a fresh `LinearSolve.init` /
+`reinit!` that re-shapes `cache.u`.
 """
 struct BigFloatLU{B<:BFLA.AbstractBFLABackend} <:
     LinearSolve.SciMLLinearSolveAlgorithm

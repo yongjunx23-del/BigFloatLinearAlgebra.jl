@@ -17,7 +17,7 @@ All notable changes to this project are documented here. The format is based on
 - A checked `solve!(x, cache, b)` (re-owns a shared/ambient-precision
   destination safely) and a solver-facing `solve_trusted!(x, cache, b)` that is
   the zero-allocation hot path for an already-owned destination.
-- Zero-Julia-allocation Native Cholesky and LU `factorize!`/`solve!`/full-cycle
+- Zero-Julia-allocation Native Cholesky and LU `factorize!` + `solve_trusted!` full-cycle
   hot paths after warm-up (verified across 128/256/512 bit and sizes 8/32/128).
 - LinearSolve.jl adapter rebuilt directly on the reusable factor cache: an
   RHS-only solve allocates no new `BigFloat` element and a matrix refresh
