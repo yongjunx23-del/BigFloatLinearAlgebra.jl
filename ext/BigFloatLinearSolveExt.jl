@@ -13,7 +13,7 @@ factorization through a reusable, precision-specific factor cache. The factor
 matrix is owned by the cache and reused across right-hand-side-only updates
 until LinearSolve marks the cache fresh again. After mutating `A` in place,
 assign it back to `cache.A` or call `reinit!(cache; A = A)` so the cache
-re-factorizes into the same owned storage.
+re-factorizes into the *same* owned storage (no factor deep-copy).
 """
 struct BigFloatLU{B<:BFLA.AbstractBFLABackend} <:
     LinearSolve.SciMLLinearSolveAlgorithm
@@ -54,54 +54,38 @@ LinearSolve.default_alias_b(
 
 """Typed cache slot kept by a LinearSolve `LinearCache`.
 
-Holds a BFLA reusable factor cache (the hot path) plus a compatibility factor
-handle exposing the ordinary `AbstractBFLAFactor` API. The `cache` owns its
-factor matrix and workspace; `factorize!` and `solve!` write into existing owned
-destinations, so repeated RHS-only solves allocate no new BigFloat objects. The
-`factor` handle is rebuilt only when the matrix is refreshed, never on an
-RHS-only update.
+The adapter is built directly on a reusable BFLA factor cache — there is no
+second, allocating factor copy. `cache` owns the factor matrix and workspace;
+`factorize!` and `solve_trusted!` write into existing owned destinations, so an
+RHS-only solve allocates no new BigFloat objects and a matrix refresh reuses the
+same factor storage. The solution-ownership fields let the adapter re-verify
+`cache.u` (shape, precision, array identity) so a reinit/re-shape never silently
+corrupts a shared `fill!` destination.
 """
-mutable struct _BFLALinearCache{F<:BFLA.AbstractBFLAFactor}
-    cache::Union{Nothing,BFLA.AbstractFactorCache}
-    factor::Union{Nothing,F}
-    prepared::Bool
-    u_repaired::Bool
+mutable struct _BFLALinearCache{C<:BFLA.AbstractFactorCache}
+    cache::Union{Nothing,C}
+    u_ready::Bool
+    u_array_id::UInt
+    u_shape::Tuple
+    u_precision::Int
 end
 
-_BFLALinearCache{F}() where {F} = _BFLALinearCache{F}(nothing, nothing, false, false)
-
-# Build a compatibility factor handle that *owns fresh copies* of the cache's
-# factor data. Each fresh/refreshed factorization therefore yields a distinct
-# factor object with the ordinary allocating-factor semantics. This handle is
-# rebuilt only when the matrix is (re)factorized; the repeated RHS-only solve
-# path never touches it, so it adds no allocation to the hot path.
-function _cache_handle(c::BFLA.BFLALUCache)
-    return BFLA.BFLALUFactor(
-        BFLA.owned_copy(c.factors; precision_bits = c.precision_bits),
-        c.backend, c.precision_bits, c.status, copy(c.pivots), copy(c.perm),
-    )
-end
-function _cache_handle(c::BFLA.BFLACholeskyCache)
-    return BFLA.BFLACholeskyFactor(
-        BFLA.owned_copy(c.factors; precision_bits = c.precision_bits),
-        c.backend, c.triangle, c.precision_bits, c.status,
-    )
-end
+_BFLALinearCache{C}() where {C} = _BFLALinearCache{C}(nothing, false, 0, (), 0)
 
 function LinearSolve.init_cacheval(
         alg::BigFloatLU, A, b, u, Pl, Pr, maxiters::Int, abstol, reltol,
         verbose, assumptions,
     )
-    F = BFLA.BFLALUFactor{Matrix{BigFloat},typeof(alg.backend)}
-    return _BFLALinearCache{F}()
+    C = BFLA.BFLALUCache{Matrix{BigFloat},typeof(alg.backend)}
+    return _BFLALinearCache{C}()
 end
 
 function LinearSolve.init_cacheval(
         alg::BigFloatCholesky, A, b, u, Pl, Pr, maxiters::Int, abstol, reltol,
         verbose, assumptions,
     )
-    F = BFLA.BFLACholeskyFactor{Matrix{BigFloat},typeof(alg.backend)}
-    return _BFLALinearCache{F}()
+    C = BFLA.BFLACholeskyCache{Matrix{BigFloat},typeof(alg.backend)}
+    return _BFLALinearCache{C}()
 end
 
 @inline function _failure(alg, cache)
@@ -143,35 +127,10 @@ function _new_cache(alg::BigFloatCholesky)
     return BFLA.BFLACholeskyCache(alg.backend; triangle = alg.triangle)
 end
 
-# Copy an independently-owned RHS into the existing owned solution elements,
-# preserving destination object identity (no element replacement, no allocation
-# of new BigFloat objects on the hot path).
-function _copy_rhs_owned!(
-        destination::AbstractArray{BigFloat},
-        source::AbstractArray{BigFloat},
-        precision_bits::Int,
-    )
-    axes(destination) == axes(source) || throw(DimensionMismatch(
-        "LinearSolve solve!: solution and right-hand side axes differ",
-    ))
-    Base.mightalias(destination, source) && throw(ArgumentError(
-        "LinearSolve solve!: solution must not alias the right-hand side",
-    ))
-    source_precision = BFLA._require_precision(
-        BFLA._check_precision(source), "LinearSolve solve!",
-    )
-    source_precision == precision_bits || throw(BFLA.PrecisionMismatch(
-        precision_bits, source_precision, nothing,
-    ))
-    @inbounds for index in eachindex(destination, source)
-        MA.operate_to!(destination[index], copy, source[index])
-    end
-    return destination
-end
-
 # Prepare the reusable cache for this problem if not already at the right
-# size/precision; then factorize the current `A` into its owned storage and
-# rebuild the compatibility factor handle.
+# size/precision; then factorize the current `A` into its owned storage. The
+# factor matrix object identity is preserved across matrix refreshes (in-place
+# re-factorization); nothing is deep-copied.
 function _ensure_factorized!(cache::_BFLALinearCache, alg, A, b)
     c = cache.cache
     p = BFLA._require_precision(
@@ -184,8 +143,46 @@ function _ensure_factorized!(cache::_BFLALinearCache, alg, A, b)
         cache.cache = c
     end
     BFLA.factorize!(c, A)
-    cache.factor = _cache_handle(c)
     return c
+end
+
+# Re-verify the LinearSolve solution `cache.u` against the adapter's recorded
+# shape, precision, and array identity. If the array was replaced, reshaped, or
+# re-precisioned (e.g. `reinit!`, vector->matrix, 128->256 bit), re-own every
+# slot so the trusted `solve_trusted!` path never writes into shared `fill!`
+# storage. On the steady repeated-solve path nothing changes and nothing
+# allocates.
+function _ensure_solution_owned!(state::_BFLALinearCache, u, p::Int)
+    p_u = try
+        BFLA._require_precision(BFLA._check_precision(u), "LinearSolve u")
+    catch
+        -1
+    end
+    if !state.u_ready || objectid(u) != state.u_array_id ||
+            size(u) != state.u_shape || p_u != state.u_precision ||
+            state.u_precision != p
+        @inbounds for index in eachindex(u)
+            u[index] = BigFloat(0; precision = p)
+        end
+        state.u_ready = true
+        state.u_array_id = objectid(u)
+        state.u_shape = size(u)
+        state.u_precision = p
+    end
+    return nothing
+end
+
+@inline function _solve_common!(cache, alg, state)
+    c = state.cache
+    _ensure_solution_owned!(state, cache.u, BFLA.factor_precision(c))
+    # Trusted solve: `u` is owned at the factor precision, so `solve_trusted!`
+    # copies `cache.b` into the existing `u` objects and solves in place with no
+    # new BigFloat allocation.
+    BFLA.solve_trusted!(cache.u, c, cache.b)
+    return SciMLBase.build_linear_solution(
+        alg, cache.u, nothing, nothing;
+        retcode = SciMLBase.ReturnCode.Success,
+    )
 end
 
 function SciMLBase.solve!(
@@ -195,7 +192,6 @@ function SciMLBase.solve!(
     if cache.isfresh
         state.cache = _ensure_factorized!(state, alg, cache.A, cache.b)
         if !BFLA.issuccess(state.cache)
-            state.factor = nothing
             return _failure(alg, cache)
         end
         cache.isfresh = false
@@ -203,15 +199,7 @@ function SciMLBase.solve!(
     c = state.cache
     c === nothing && return _failure(alg, cache)
     BFLA.issuccess(c) || return _failure(alg, cache)
-    _repair_solution_owned!(state, cache, BFLA.factor_precision(c))
-    # Solve in place: `solve!(u, cache, b)` copies b into the existing owned
-    # `u` elements and overwrites them with the solution, so repeated RHS-only
-    # solves reuse the factor and allocate no new BigFloat objects.
-    BFLA.solve!(cache.u, c, cache.b)
-    return SciMLBase.build_linear_solution(
-        alg, cache.u, nothing, nothing;
-        retcode = SciMLBase.ReturnCode.Success,
-    )
+    return _solve_common!(cache, alg, state)
 end
 
 function SciMLBase.solve!(
@@ -221,7 +209,6 @@ function SciMLBase.solve!(
     if cache.isfresh
         state.cache = _ensure_factorized!(state, alg, cache.A, cache.b)
         if !BFLA.issuccess(state.cache)
-            state.factor = nothing
             return _failure(alg, cache)
         end
         cache.isfresh = false
@@ -229,25 +216,7 @@ function SciMLBase.solve!(
     c = state.cache
     c === nothing && return _failure(alg, cache)
     BFLA.issuccess(c) || return _failure(alg, cache)
-    _repair_solution_owned!(state, cache, BFLA.factor_precision(c))
-    BFLA.solve!(cache.u, c, cache.b)
-    return SciMLBase.build_linear_solution(
-        alg, cache.u, nothing, nothing;
-        retcode = SciMLBase.ReturnCode.Success,
-    )
-end
-# LinearSolve initializes the solution with `similar`+`fill!`, which installs a
-# shared (non-owned) object in every slot and can carry the ambient precision.
-# Repair it once so `_cache_rhs_into!` can take its zero-allocation write-into-
-# existing path on every later solve. This one-time repair is the documented
-# warm-up cost; it is not part of the repeated numeric hot path.
-function _repair_solution_owned!(state::_BFLALinearCache, cache, p::Int)
-    state.u_repaired && return cache.u
-    @inbounds for index in eachindex(cache.u)
-        cache.u[index] = BigFloat(0; precision = p)
-    end
-    state.u_repaired = true
-    return cache.u
+    return _solve_common!(cache, alg, state)
 end
 
 end

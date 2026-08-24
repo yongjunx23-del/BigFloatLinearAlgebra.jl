@@ -495,7 +495,7 @@ function _cache_rhs_write!(
     ))
     p = _require_precision(_check_precision(source), op)
     dp = _require_precision(_check_precision(destination), op)
-    p == dp || throw(PrecisionMismatch(dp, p, op))
+    p == dp || throw(PrecisionMismatch(dp, p, nothing))
     @inbounds for index in eachindex(destination, source)
         MA.operate_to!(destination[index], copy, source[index])
     end
@@ -901,6 +901,13 @@ end
 Reusable rank-revealing column-pivoted QR cache. Owned factor matrix,
 Householder `tau`, column permutation `jpvt`, rank-policy scalars, and scratch
 at an explicit precision.
+
+**Scope (experimental):** this cache is currently *square-only* (`n × n`). It
+does **not** yet support the rectangular / overdetermined systems that the
+ordinary allocating [`qr`](@ref) handles. `tau` has length `n` and `jpvt` length
+`n`. Do not present this cache as a full RRQR backend for rectangular inputs;
+use the allocating `qr!` for those. Factorization may still allocate its pivot/
+`tau` metadata (the solve path is zero-allocation).
 """
 mutable struct BFLARRQRCache{M<:AbstractMatrix{BigFloat},B<:AbstractBFLABackend} <: AbstractFactorCache
     factors::M
