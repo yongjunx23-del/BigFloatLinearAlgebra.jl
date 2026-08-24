@@ -19,8 +19,8 @@ All notable changes to this project are documented here. The format is based on
   right-hand-side storage when precision or mutable BigFloat ownership changes.
 - CI tests current LinearSolve releases and the supported lower compatibility
   bounds without making LinearSolve a required runtime dependency.
-- TagBot now receives the repository permissions required to publish tags and
-  releases after General Registry registration.
+- TagBot now uses a repository-scoped write deploy key to publish tags whose
+  registered commits contain GitHub workflow changes.
 
 ## [0.1.0] - 2026-08-17
 
