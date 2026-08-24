@@ -57,6 +57,12 @@ All notable changes to this project are documented here. The format is based on
   `invalidate!`/failed factorization instead of returning stale metadata.
 - LinearSolve adapter re-owns `cache.u` on a same-array shared re-fill and
   rethrows interrupts/out-of-memory (only precision errors are handled).
+- `prepare_refinement!` is now a checked public API: it requires a prepared
+  cache, accepts only `AbstractVecOrMat{BigFloat}` templates, and throws a clear
+  error on use-before-prepare, precision, or shape mismatch (no silent resize).
+- A canonical `docs/src/reference.md` API reference (via `@autodocs`) documents
+  every exported binding; `makedocs(checkdocs = :exports)` enforces it.
+
 
 ### Known limitations
 
