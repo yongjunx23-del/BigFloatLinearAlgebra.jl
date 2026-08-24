@@ -283,6 +283,28 @@ end
     end
     @test @allocated(solve_trusted!(x, cc, b)) == 0
     @test @allocated(factorize!(cc, Aspd)) == 0
+    @test @allocated(begin factorize!(cc, Aspd); solve_trusted!(x, cc, b); end) == 0
+
+    # LDLT and RRQR: trusted solve is zero-allocation; their factorize! may
+    # allocate pivot/tau metadata (not gated to zero).
+    Aind = _indefinite_fixture(n, p, rng)
+    cl = BFLALDLTCache(NativeBackend())
+    prepare!(cl, n, p)
+    factorize!(cl, Aind)
+    solve_trusted!(x, cl, b)
+    for _ in 1:5
+        solve_trusted!(x, cl, b)
+    end
+    @test @allocated(solve_trusted!(x, cl, b)) == 0
+
+    cq = BFLARRQRCache(NativeBackend())
+    prepare!(cq, n, p)
+    factorize!(cq, A)
+    solve_trusted!(x, cq, b)
+    for _ in 1:5
+        solve_trusted!(x, cq, b)
+    end
+    @test @allocated(solve_trusted!(x, cq, b)) == 0
 end
 
 @testset "cache Native/Generic numerical cross-check" begin
@@ -562,4 +584,33 @@ end
     xm = owned_zeros(BigFloat, n; precision_bits = p)
     solve_trusted!(xm, cm, b)
     @test_throws DimensionMismatch refine_once!(cm, A, xm, b)  # vector vs n×2 scratch
+end
+
+@testset "README reusable-cache example runs" begin
+    import MutableArithmetics as MA
+    n, p = 32, 256
+    A = owned_zeros(BigFloat, n, n; precision_bits = p)
+    for j in 1:n, i in 1:n
+        A[i, j] = BigFloat(i == j ? n - i + 8 : (i + j) % 5 + 1; precision = p)
+    end
+    for i in 1:n
+        MA.operate!(+, A[i, i], BigFloat(n; precision = p))
+    end
+    b = owned_zeros(BigFloat, n; precision_bits = p)
+    for i in 1:n
+        b[i] = BigFloat(i + 1; precision = p)
+    end
+    cache = BFLACholeskyCache(NativeBackend())
+    prepare!(cache, n, p; nrhs = 1)
+    factorize!(cache, A)
+    @test issuccess(cache)
+    x = owned_zeros(BigFloat, n; precision_bits = p)
+    solve_trusted!(x, cache, b)
+    @test isfinite(_backward_error(A, x, b, p))
+    x2 = owned_zeros(BigFloat, n; precision_bits = p)
+    fill!(x2, BigFloat(0; precision = p))
+    solve!(x2, cache, b)
+    @test isfinite(_backward_error(A, x2, b, p))
+    invalidate!(cache)
+    @test factor_status(cache).kind == :unprepared
 end

@@ -60,14 +60,30 @@ the hot path allocates no new Julia `BigFloat` objects.
 
 ```julia
 using BigFloatLinearAlgebra
+import MutableArithmetics as MA
 
 n, p = 32, 256
+# Build an SPD n×n matrix A and an n-vector RHS b at precision p.
+A = owned_zeros(BigFloat, n, n; precision_bits = p)
+for j in 1:n, i in 1:n
+    A[i, j] = BigFloat(i == j ? n - i + 8 : (i + j) % 5 + 1; precision = p)
+end
+for i in 1:n
+    MA.operate!(+, A[i, i], BigFloat(n; precision = p))  # ensure SPD diagonal
+end
+b = owned_zeros(BigFloat, n; precision_bits = p)
+for i in 1:n
+    b[i] = BigFloat(i + 1; precision = p)
+end
+
 cache = BFLACholeskyCache(NativeBackend())
 prepare!(cache, n, p; nrhs = 1)          # reserve owned storage (allocating)
 factorize!(cache, A)                     # factor A into the cache's owned matrix
 x = owned_zeros(BigFloat, n; precision_bits = p)
 solve_trusted!(x, cache, b)              # trusted: x must be owned at precision p
-# checked alternative for an arbitrary destination:
+# checked alternative for an arbitrary destination (re-owns safely):
+x2 = owned_zeros(BigFloat, n; precision_bits = p)
+fill!(x2, BigFloat(0; precision = p))
 solve!(x2, cache, b)                     # re-owns x2 safely (allocates by design)
 invalidate!(cache)                       # drop the factorization, keep storage
 ```
