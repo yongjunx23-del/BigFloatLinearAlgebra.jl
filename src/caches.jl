@@ -49,15 +49,12 @@ end
 """
     invalidate!(cache) -> cache
 
-Mark the cache as holding no valid factorization. Storage and metadata arrays
-are preserved for reuse; only the status is reset. A subsequent `factorize!`
-overwrites the same owned destinations.
+Mark the cache as holding no valid factorization. The owned factor matrix,
+metadata arrays, and reusable refinement scratch are all preserved for reuse;
+only the status is reset. A subsequent `factorize!` overwrites the same owned
+destinations and `refine_once!` reuses the retained refinement storage.
 """
 function invalidate!(cache::AbstractFactorCache)
-    cache.refine = nothing
-    cache.refine = nothing
-    cache.refine = nothing
-    cache.refine = nothing
     cache.status = FactorStatus(:unprepared, nothing)
     return cache
 end
@@ -196,12 +193,32 @@ function CacheScalars(precision_bits::Int)
     )
 end
 
-# Owned refinement scratch. Allocated by prepare! so the refinement step itself
-# writes into existing destinations.
+# Owned refinement scratch. Allocated by prepare_refinement! so the refinement
+# step itself writes into existing destinations.
 mutable struct CacheRefineStorage
     residual::AbstractArray{BigFloat}
     correction::AbstractArray{BigFloat}
     precision_bits::Int
+end
+
+"""
+    prepare_refinement!(cache, nrhs=1) -> cache
+
+Eagerly allocate the cache's owned residual/correction scratch to `n × nrhs` at
+the cache precision, so a subsequent `refine_once!` writes into existing
+destinations. This is the refinement analogue of `prepare!`; it makes `nrhs` a
+real contract rather than an accepted-but-ignored keyword. It is also called by
+`prepare!`.
+"""
+function prepare_refinement!(cache::AbstractFactorCache, nrhs::Int=1)
+    nrhs >= 1 || throw(ArgumentError("prepare_refinement!: nrhs must be positive"))
+    n = cache.n
+    cache.refine = CacheRefineStorage(
+        owned_zeros(BigFloat, n, nrhs; precision_bits = cache.precision_bits),
+        owned_zeros(BigFloat, n, nrhs; precision_bits = cache.precision_bits),
+        cache.precision_bits,
+    )
+    return cache
 end
 
 
@@ -262,6 +279,7 @@ function prepare!(
     cache.scalars = CacheScalars(precision_bits)
     cache.workspace = BFLAWorkspace(precision_bits; workers = workspace_workers)
     cache.status = FactorStatus(:unprepared, nothing)
+    prepare_refinement!(cache, nrhs)
     cache.prepared = true
     return cache
 end
@@ -376,12 +394,32 @@ function solve!(
     cache::BFLACholeskyCache,
     b::AbstractVecOrMat{BigFloat},
 )
-    _cache_require_success(cache, "solve!")
-    size(x, 1) == cache.n && size(b, 1) == cache.n || throw(DimensionMismatch(
-        "solve!: cache, solution and right-hand side dimensions differ",
-    ))
-    _require_cache_rhs(cache, b, "solve!")
-    _cache_rhs_into!(x, b, "solve!")
+    _cache_checked_solve_check!(x, cache, b, "solve!")
+    _cache_rhs_repair!(x, b, "solve!")
+    workspace, worker = _cache_solve_workspace(cache, 1)
+    _cholesky_solve!(
+        cache.backend, cache.factors, cache.triangle, cache.precision_bits,
+        x, workspace, worker,
+    )
+    return x
+end
+
+"""
+    solve_trusted!(x, cache, b) -> x
+
+Trusted, ownership-safe solve for the solver-facing hot path. `x` must already
+be independently-owned at the factor precision (e.g. from `owned_zeros`); BFLA
+copies `b` into the existing `x` objects and solves in place, allocating no new
+BigFloat objects. Unlike the checked [`solve!`](@ref), this skips the ownership
+and precision scan, which the caller guarantees.
+"""
+function solve_trusted!(
+    x::AbstractVecOrMat{BigFloat},
+    cache::BFLACholeskyCache,
+    b::AbstractVecOrMat{BigFloat},
+)
+    _cache_trusted_solve_check!(x, cache, b, "solve_trusted!")
+    _cache_rhs_write!(x, b, "solve_trusted!")
     workspace, worker = _cache_solve_workspace(cache, 1)
     _cholesky_solve!(
         cache.backend, cache.factors, cache.triangle, cache.precision_bits,
@@ -414,6 +452,79 @@ end
         "solve!: workspace_worker must be in 1:$(ws.workers)",
     ))
     return ws, worker
+end
+
+# --- checked / trusted solve contract --------------------------------------
+
+# Checked solve: replace every solution element with an independently-owned copy
+# of the RHS at the RHS precision, repairing both stale precision and shared
+# ownership. Safe for arbitrary destinations (e.g. `fill(BigFloat(...), n)` or
+# LinearSolve-style `similar`+`fill!`); allocates by design.
+function _cache_rhs_repair!(
+    destination::AbstractArray{BigFloat},
+    source::AbstractArray{BigFloat},
+    op::AbstractString,
+)
+    axes(destination) == axes(source) || throw(DimensionMismatch(
+        "$op: solution and right-hand side axes differ",
+    ))
+    Base.mightalias(destination, source) && throw(ArgumentError(
+        "$op: solution must not alias the right-hand side",
+    ))
+    _require_precision(_check_precision(source), op)
+    @inbounds for index in eachindex(destination, source)
+        destination[index] = MA.mutable_copy(source[index])
+    end
+    return destination
+end
+
+# Trusted solve: copy the RHS into an already-owned, precision-consistent
+# destination by writing into the existing BigFloat objects (no replacement, no
+# ownership scan). The caller must guarantee the destination is independently
+# owned at the factor precision (e.g. from `owned_zeros`).
+function _cache_rhs_write!(
+    destination::AbstractArray{BigFloat},
+    source::AbstractArray{BigFloat},
+    op::AbstractString,
+)
+    axes(destination) == axes(source) || throw(DimensionMismatch(
+        "$op: solution and right-hand side axes differ",
+    ))
+    Base.mightalias(destination, source) && throw(ArgumentError(
+        "$op: solution must not alias the right-hand side",
+    ))
+    p = _require_precision(_check_precision(source), op)
+    dp = _require_precision(_check_precision(destination), op)
+    p == dp || throw(PrecisionMismatch(dp, p, op))
+    @inbounds for index in eachindex(destination, source)
+        MA.operate_to!(destination[index], copy, source[index])
+    end
+    return destination
+end
+
+# Shared validation for the checked `solve!`: status, dimensions, RHS precision,
+# and aliasing of the solution against both the factor and the RHS.
+function _cache_checked_solve_check!(x, cache, b, op)
+    _cache_require_success(cache, op)
+    (size(x, 1) == cache.n && size(b, 1) == cache.n) || throw(DimensionMismatch(
+        "$op: cache, solution and right-hand side dimensions differ",
+    ))
+    _require_cache_rhs(cache, b, op)
+    _require_no_alias(x, cache.factors, op)
+    Base.mightalias(x, b) && throw(ArgumentError(
+        "$op: solution must not alias the right-hand side",
+    ))
+    return nothing
+end
+
+# Minimal validation for the trusted `solve_trusted!`: status and dimensions
+# only; the caller guarantees destination ownership and precision.
+function _cache_trusted_solve_check!(x, cache, b, op)
+    _cache_require_success(cache, op)
+    (size(x, 1) == cache.n && size(b, 1) == cache.n) || throw(DimensionMismatch(
+        "$op: cache, solution and right-hand side dimensions differ",
+    ))
+    return nothing
 end
 
 # --- LU --------------------------------------------------------------------
@@ -468,6 +579,7 @@ function prepare!(
     cache.scalars = CacheScalars(precision_bits)
     cache.workspace = BFLAWorkspace(precision_bits; workers = workspace_workers)
     cache.status = FactorStatus(:unprepared, nothing)
+    prepare_refinement!(cache, nrhs)
     cache.prepared = true
     return cache
 end
@@ -579,12 +691,32 @@ function solve!(
     cache::BFLALUCache,
     b::AbstractVecOrMat{BigFloat},
 )
-    _cache_require_success(cache, "solve!")
-    size(x, 1) == cache.n && size(b, 1) == cache.n || throw(DimensionMismatch(
-        "solve!: cache, solution and right-hand side dimensions differ",
-    ))
-    _require_cache_rhs(cache, b, "solve!")
-    _cache_rhs_into!(x, b, "solve!")
+    _cache_checked_solve_check!(x, cache, b, "solve!")
+    _cache_rhs_repair!(x, b, "solve!")
+    workspace, worker = _cache_solve_workspace(cache, 1)
+    _lu_solve!(
+        cache.backend, cache.factors, cache.pivots, cache.precision_bits,
+        x, workspace, worker,
+    )
+    return x
+end
+
+"""
+    solve_trusted!(x, cache, b) -> x
+
+Trusted, ownership-safe solve for the solver-facing hot path. `x` must already
+be independently-owned at the factor precision (e.g. from `owned_zeros`); BFLA
+copies `b` into the existing `x` objects and solves in place, allocating no new
+BigFloat objects. Unlike the checked [`solve!`](@ref), this skips the ownership
+and precision scan, which the caller guarantees.
+"""
+function solve_trusted!(
+    x::AbstractVecOrMat{BigFloat},
+    cache::BFLALUCache,
+    b::AbstractVecOrMat{BigFloat},
+)
+    _cache_trusted_solve_check!(x, cache, b, "solve_trusted!")
+    _cache_rhs_write!(x, b, "solve_trusted!")
     workspace, worker = _cache_solve_workspace(cache, 1)
     _lu_solve!(
         cache.backend, cache.factors, cache.pivots, cache.precision_bits,
@@ -669,6 +801,7 @@ function prepare!(
     cache.scalars = CacheScalars(precision_bits)
     cache.workspace = BFLAWorkspace(precision_bits; workers = workspace_workers)
     cache.status = FactorStatus(:unprepared, nothing)
+    prepare_refinement!(cache, nrhs)
     cache.prepared = true
     return cache
 end
@@ -723,12 +856,29 @@ function solve!(
     cache::BFLALDLTCache,
     b::AbstractVecOrMat{BigFloat},
 )
-    _cache_require_success(cache, "solve!")
-    size(x, 1) == cache.n && size(b, 1) == cache.n || throw(DimensionMismatch(
-        "solve!: cache, solution and right-hand side dimensions differ",
-    ))
-    _require_cache_rhs(cache, b, "solve!")
-    _cache_rhs_into!(x, b, "solve!")
+    _cache_checked_solve_check!(x, cache, b, "solve!")
+    _cache_rhs_repair!(x, b, "solve!")
+    workspace, worker = _cache_solve_workspace(cache, 1)
+    _ldlt_solve!(cache.backend, cache, x, workspace, worker)
+    return x
+end
+
+"""
+    solve_trusted!(x, cache, b) -> x
+
+Trusted, ownership-safe solve for the solver-facing hot path. `x` must already
+be independently-owned at the factor precision (e.g. from `owned_zeros`); BFLA
+copies `b` into the existing `x` objects and solves in place, allocating no new
+BigFloat objects. Unlike the checked [`solve!`](@ref), this skips the ownership
+and precision scan, which the caller guarantees.
+"""
+function solve_trusted!(
+    x::AbstractVecOrMat{BigFloat},
+    cache::BFLALDLTCache,
+    b::AbstractVecOrMat{BigFloat},
+)
+    _cache_trusted_solve_check!(x, cache, b, "solve_trusted!")
+    _cache_rhs_write!(x, b, "solve_trusted!")
     workspace, worker = _cache_solve_workspace(cache, 1)
     _ldlt_solve!(cache.backend, cache, x, workspace, worker)
     return x
@@ -828,6 +978,7 @@ function prepare!(
     cache.scalars = CacheScalars(precision_bits)
     cache.workspace = BFLAWorkspace(precision_bits; workers = workspace_workers)
     cache.status = FactorStatus(:unprepared, nothing)
+    prepare_refinement!(cache, nrhs)
     cache.prepared = true
     return cache
 end
@@ -882,12 +1033,29 @@ function solve!(
     cache::BFLARRQRCache,
     b::AbstractVecOrMat{BigFloat},
 )
-    _cache_require_success(cache, "solve!")
-    size(x, 1) == cache.n && size(b, 1) == cache.n || throw(DimensionMismatch(
-        "solve!: cache, solution and right-hand side dimensions differ",
-    ))
-    _require_cache_rhs(cache, b, "solve!")
-    _cache_rhs_into!(x, b, "solve!")
+    _cache_checked_solve_check!(x, cache, b, "solve!")
+    _cache_rhs_repair!(x, b, "solve!")
+    workspace, worker = _cache_solve_workspace(cache, 1)
+    _qr_solve!(cache.backend, cache, x, workspace, worker)
+    return x
+end
+
+"""
+    solve_trusted!(x, cache, b) -> x
+
+Trusted, ownership-safe solve for the solver-facing hot path. `x` must already
+be independently-owned at the factor precision (e.g. from `owned_zeros`); BFLA
+copies `b` into the existing `x` objects and solves in place, allocating no new
+BigFloat objects. Unlike the checked [`solve!`](@ref), this skips the ownership
+and precision scan, which the caller guarantees.
+"""
+function solve_trusted!(
+    x::AbstractVecOrMat{BigFloat},
+    cache::BFLARRQRCache,
+    b::AbstractVecOrMat{BigFloat},
+)
+    _cache_trusted_solve_check!(x, cache, b, "solve_trusted!")
+    _cache_rhs_write!(x, b, "solve_trusted!")
     workspace, worker = _cache_solve_workspace(cache, 1)
     _qr_solve!(cache.backend, cache, x, workspace, worker)
     return x
@@ -944,20 +1112,25 @@ end
 # --- refinement -----------------------------------------------------------
 
 """
-    refine_once!(cache, A, x, b; residual_precision=nothing) -> NamedTuple
+    refine_once!(cache, A, x, b) -> NamedTuple
 
 Perform exactly one iterative-refinement correction on the cache's factor:
 `residual = b - A*x`, solve the factor system for a correction, and update
-`x += correction`. The cache owns the residual and correction scratch. This is a
-single step; BFLA does not iterate, choose a tolerance, raise precision, or
-switch backend.
+`x += correction`. The cache owns the residual and correction scratch
+(allocated by `prepare!` / `prepare_refinement!`), so once that storage is ready
+the step writes into existing destinations. This is a single step; BFLA does not
+iterate, choose a tolerance, raise precision, or switch backend.
+
+Cache refinement is *factor-precision-only*: the residual, correction, and
+backward error all use the cache's explicit precision. There is intentionally no
+`residual_precision` keyword here; higher-precision residual refinement belongs
+to the allocating-factor API and is not part of the cache contract.
 """
 function refine_once!(
     cache::Union{BFLACholeskyCache,BFLALUCache,BFLALDLTCache,BFLARRQRCache},
     A::AbstractMatrix{BigFloat},
     x::AbstractVecOrMat{BigFloat},
-    b::AbstractVecOrMat{BigFloat};
-    residual_precision::Union{Nothing,Int}=nothing,
+    b::AbstractVecOrMat{BigFloat},
 )
     _cache_require_success(cache, "refine_once!")
     _require_cache_matrix(cache, A, "refine_once!")
@@ -969,8 +1142,7 @@ function refine_once!(
     size(x, 1) == n || throw(DimensionMismatch(
         "refine_once!: cache and solution rows differ",
     ))
-    residual = cache.scalars === nothing ? nothing :
-        _cache_refine_storage(cache, size(b))
+    residual = _cache_refine_storage(cache, size(b))
     return _refine_once_cached(cache, A, x, b, residual, p)
 end
 

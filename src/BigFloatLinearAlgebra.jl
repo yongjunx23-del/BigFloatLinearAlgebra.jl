@@ -133,6 +133,7 @@ export AbstractBFLABackend,
     BFLALDLTCache,
     BFLARRQRCache,
     prepare!,
+    prepare_refinement!,
     factorize!,
     factor_prepared,
     factor_size,
@@ -213,6 +214,7 @@ export AbstractBFLABackend,
     ldiv!,
     ldiv_trusted!,
     solve!,
+    solve_trusted!,
     solve
 
 end

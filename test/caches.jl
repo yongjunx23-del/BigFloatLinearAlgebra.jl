@@ -54,6 +54,19 @@ function _square_fixture(n, p, rng)
     return A
 end
 
+
+# Diagonal-dominant square matrix that forces multiple row swaps under LU.
+function _pivot_heavy_fixture(n, p)
+    A = owned_zeros(BigFloat, n, n; precision_bits = p)
+    for j in 1:n, i in 1:n
+        A[i, j] = BigFloat((i + j) % 5 + 1; precision = p)
+    end
+    for i in 1:n
+        A[i, i] = BigFloat(n - i + 5; precision = p)
+    end
+    return A
+end
+
 function _rhs(A, x, p)
     b = owned_zeros(BigFloat, size(x)...; precision_bits = p)
     if x isa AbstractVector
@@ -129,10 +142,11 @@ _eps_p(p) = BigFloat(2; precision = p) ^ (1 - p)
         @test factor_status(c).kind == :success
         @test factor_kind(c) == :lu
 
-        # repeated solve into an existing destination preserves identity
-        solve!(x, c, b)
+        # repeated trusted solve into an existing owned destination preserves
+        # object identity (the checked solve! re-owns by design)
+        solve_trusted!(x, c, b)
         id_before = objectid.(x)
-        solve!(x, c, b)
+        solve_trusted!(x, c, b)
         @test objectid.(x) == id_before
         @test _backward_error(A, x, b, p) <= BigFloat(100; precision = p) * _eps_p(p)
 
@@ -246,13 +260,13 @@ end
     for _ in 1:20
         factorize!(c, A)
     end
-    solve!(x, c, b)
+    solve_trusted!(x, c, b)
     for _ in 1:5
-        solve!(x, c, b)
+        solve_trusted!(x, c, b)
     end
-    @test @allocated(solve!(x, c, b)) == 0
+    @test @allocated(solve_trusted!(x, c, b)) == 0
     @test @allocated(factorize!(c, A)) == 0
-    @test @allocated(begin factorize!(c, A); solve!(x, c, b); end) == 0
+    @test @allocated(begin factorize!(c, A); solve_trusted!(x, c, b); end) == 0
 
     # Cholesky: same contract.
     Aspd = _spd_fixture(n, p, rng)
@@ -262,11 +276,11 @@ end
     for _ in 1:5
         factorize!(cc, Aspd)
     end
-    solve!(x, cc, b)
+    solve_trusted!(x, cc, b)
     for _ in 1:5
-        solve!(x, cc, b)
+        solve_trusted!(x, cc, b)
     end
-    @test @allocated(solve!(x, cc, b)) == 0
+    @test @allocated(solve_trusted!(x, cc, b)) == 0
     @test @allocated(factorize!(cc, Aspd)) == 0
 end
 
@@ -304,4 +318,107 @@ end
             @test _backward_error(A, x_n, b, p) <= BigFloat(100; precision = p) * _eps_p(p)
         end
     end
+end
+
+@testset "checked solve! is ownership-safe on a shared destination" begin
+    p = 256
+    n = 8
+    rng = MersenneTwister(99)
+    A = _square_fixture(n, p, rng)
+    b = owned_zeros(BigFloat, n; precision_bits = p)
+    for i in 1:n
+        b[i] = BigFloat(i; precision = p)
+    end
+    c = BFLALUCache(NativeBackend())
+    prepare!(c, n, p)
+    factorize!(c, A)
+    # A shared-element destination (all slots point at one object) must not be
+    # silently corrupted; the checked solve! re-owns it safely.
+    x_shared = fill!(Array{BigFloat}(undef, n), BigFloat(0; precision = p))
+    @test all(x_shared[i] === x_shared[1] for i in eachindex(x_shared))
+    solve!(x_shared, c, b)
+    @test is_independently_owned(x_shared)
+    @test _backward_error(A, x_shared, b, p) <= BigFloat(100; precision = p) * _eps_p(p)
+    # A shared destination with the wrong (ambient) precision is also repaired.
+    x_ambient = fill!(Array{BigFloat}(undef, n), BigFloat(0))
+    solve!(x_ambient, c, b)
+    @test all(precision(value) == p for value in x_ambient)
+end
+
+@testset "LU cache Generic backend executes the reference path" begin
+    p = 256
+    n = 8
+    rng = MersenneTwister(1234)
+    A = _square_fixture(n, p, rng)
+    b = owned_zeros(BigFloat, n; precision_bits = p)
+    for i in 1:n
+        b[i] = BigFloat(i + 1; precision = p)
+    end
+    cn = BFLALUCache(NativeBackend())
+    prepare!(cn, n, p)
+    factorize!(cn, A)
+    @test factor_backend(cn) === NativeBackend()
+    x_n = owned_zeros(BigFloat, n; precision_bits = p)
+    solve_trusted!(x_n, cn, b)
+
+    cg = BFLALUCache(GenericBackend())
+    prepare!(cg, n, p)
+    factorize!(cg, A)
+    @test factor_backend(cg) === GenericBackend()
+    x_g = owned_zeros(BigFloat, n; precision_bits = p)
+    solve_trusted!(x_g, cg, b)
+    @test _cross_close(x_n, x_g, p; dimension = n)
+    # the two backends dispatch to different kernels, so their recorded pivots
+    # may differ; both must yield a valid, consistent factorization
+    @test issuccess(cn) && issuccess(cg)
+end
+
+@testset "LU cache final permutation matches allocating LU on pivot-heavy input" begin
+    p = 256
+    for n in (4, 8)
+        A = _pivot_heavy_fixture(n, p)
+        c = BFLALUCache(NativeBackend())
+        prepare!(c, n, p)
+        factorize!(c, A)
+        F = lu(NativeBackend(), A; check = false)
+        @test factor_perm(c) == factor_perm(F)
+        @test factor_diagnostics(c).permutation == factor_perm(F)
+        @test any(k -> c.pivots[k] != k, eachindex(c.pivots))  # pivoting occurred
+        b = owned_zeros(BigFloat, n; precision_bits = p)
+        for i in 1:n
+            b[i] = BigFloat(i + 1; precision = p)
+        end
+        x = owned_zeros(BigFloat, n; precision_bits = p)
+        solve_trusted!(x, c, b)
+        @test _backward_error(A, x, b, p) <= BigFloat(200; precision = p) * _eps_p(p)
+    end
+end
+
+@testset "cache refinement lifecycle and allocation" begin
+    p = 256
+    n = 16
+    rng = MersenneTwister(5)
+    A = _spd_fixture(n, p, rng)
+    b = owned_zeros(BigFloat, n; precision_bits = p)
+    for i in 1:n
+        b[i] = BigFloat(rand(rng, -1024:1024); precision = p)
+    end
+    c = BFLACholeskyCache(NativeBackend())
+    prepare!(c, n, p; nrhs = 1)
+    @test c.refine !== nothing   # prepare_refinement! ran eagerly
+    factorize!(c, A)
+    x = owned_zeros(BigFloat, n; precision_bits = p)
+    solve_trusted!(x, c, b)
+    before = _backward_error(A, x, b, p)
+    r = refine_once!(c, A, x, b)
+    @test isfinite(r.backward_error_after)
+    # one refinement step must not worsen the backward error (or stay equal)
+    @test r.backward_error_after <= before + BigFloat(10; precision = p) * _eps_p(p)
+    # invalidate/refactor keeps the owned refinement scratch reusable
+    invalidate!(c)
+    factorize!(c, A)
+    x2 = owned_zeros(BigFloat, n; precision_bits = p)
+    solve_trusted!(x2, c, b)
+    r2 = refine_once!(c, A, x2, b)
+    @test isfinite(r2.backward_error_after)
 end
