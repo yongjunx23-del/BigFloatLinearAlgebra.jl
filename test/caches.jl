@@ -422,3 +422,36 @@ end
     r2 = refine_once!(c, A, x2, b)
     @test isfinite(r2.backward_error_after)
 end
+
+@testset "solve_trusted! rejects aliasing against factor and RHS" begin
+    p = 256
+    n = 8
+    rng = MersenneTwister(2024)
+    b = owned_zeros(BigFloat, n; precision_bits = p)
+    for i in 1:n
+        b[i] = BigFloat(i; precision = p)
+    end
+    for (ctor, kind) in (
+        (BFLACholeskyCache, :cholesky),
+        (BFLALUCache, :lu),
+        (BFLALDLTCache, :ldlt),
+        (BFLARRQRCache, :rrqr),
+    )
+        A = kind == :cholesky ? _spd_fixture(n, p, rng) :
+            kind == :ldlt ? _indefinite_fixture(n, p, rng) :
+            _square_fixture(n, p, rng)
+        c = ctor(NativeBackend())
+        prepare!(c, n, p)
+        factorize!(c, A)
+        @test issuccess(c)
+        x = owned_zeros(BigFloat, n; precision_bits = p)
+        # x aliases a column of the factor matrix -> must be rejected.
+        x_alias = view(factor_matrix(c), :, 1)
+        @test_throws ArgumentError solve_trusted!(x_alias, c, b)
+        # x aliases the RHS -> must be rejected.
+        @test_throws ArgumentError solve_trusted!(b, c, b)
+        # a correct owned destination solves fine.
+        solve_trusted!(x, c, b)
+        @test isfinite(_backward_error(A, x, b, p))
+    end
+end

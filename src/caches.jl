@@ -203,12 +203,14 @@ end
 
 """
     prepare_refinement!(cache, nrhs=1) -> cache
+    prepare_refinement!(cache, rhs_template) -> cache
 
-Eagerly allocate the cache's owned residual/correction scratch to `n × nrhs` at
-the cache precision, so a subsequent `refine_once!` writes into existing
-destinations. This is the refinement analogue of `prepare!`; it makes `nrhs` a
-real contract rather than an accepted-but-ignored keyword. It is also called by
-`prepare!`.
+Eagerly allocate the cache's owned residual/correction scratch so a subsequent
+`refine_once!` writes into existing destinations. The integer form reserves
+`n × nrhs` (matrix RHS); the array form reserves the exact shape of
+`rhs_template` (a `Vector{BigFloat}` or `Matrix{BigFloat}`), so a Vector RHS and
+an `n×1` Matrix RHS are kept distinct and no `refine_once!` reallocates for the
+shape it was prepared for. It is also called by `prepare!` (with `nrhs`).
 """
 function prepare_refinement!(cache::AbstractFactorCache, nrhs::Int=1)
     nrhs >= 1 || throw(ArgumentError("prepare_refinement!: nrhs must be positive"))
@@ -216,6 +218,21 @@ function prepare_refinement!(cache::AbstractFactorCache, nrhs::Int=1)
     cache.refine = CacheRefineStorage(
         owned_zeros(BigFloat, n, nrhs; precision_bits = cache.precision_bits),
         owned_zeros(BigFloat, n, nrhs; precision_bits = cache.precision_bits),
+        cache.precision_bits,
+    )
+    return cache
+end
+
+function prepare_refinement!(cache::AbstractFactorCache, rhs_template::AbstractArray{BigFloat})
+    p = _require_precision(_check_precision(rhs_template), "prepare_refinement!")
+    p == cache.precision_bits || throw(PrecisionMismatch(cache.precision_bits, p, nothing))
+    size(rhs_template, 1) == cache.n || throw(DimensionMismatch(
+        "prepare_refinement!: RHS rows ($(size(rhs_template, 1))) differ from " *
+        "cache order $(cache.n)",
+    ))
+    cache.refine = CacheRefineStorage(
+        owned_zeros(BigFloat, size(rhs_template)...; precision_bits = cache.precision_bits),
+        owned_zeros(BigFloat, size(rhs_template)...; precision_bits = cache.precision_bits),
         cache.precision_bits,
     )
     return cache
@@ -517,12 +534,17 @@ function _cache_checked_solve_check!(x, cache, b, op)
     return nothing
 end
 
-# Minimal validation for the trusted `solve_trusted!`: status and dimensions
-# only; the caller guarantees destination ownership and precision.
+# Minimal validation for the trusted `solve_trusted!`: status, dimensions, and
+# aliasing against the factor and the RHS. The caller still guarantees the
+# destination's independent BigFloat ownership and precision.
 function _cache_trusted_solve_check!(x, cache, b, op)
     _cache_require_success(cache, op)
     (size(x, 1) == cache.n && size(b, 1) == cache.n) || throw(DimensionMismatch(
         "$op: cache, solution and right-hand side dimensions differ",
+    ))
+    _require_no_alias(x, cache.factors, op)
+    Base.mightalias(x, b) && throw(ArgumentError(
+        "$op: solution must not alias the right-hand side",
     ))
     return nothing
 end
