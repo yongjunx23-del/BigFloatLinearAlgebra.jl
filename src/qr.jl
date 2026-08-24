@@ -104,6 +104,12 @@ function factor_Rdiag(F::BFLAQRFactor)
     ]
 end
 
+"""
+    factor_tolerance(F) -> BigFloat
+
+The absolute RRQR rank tolerance (the 0.1.0 spelling; alias of
+[`factor_rank_atol`](@ref)).
+"""
 factor_tolerance(F::BFLAQRFactor) = MA.mutable_copy(F.tolerance)
 
 """

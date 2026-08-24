@@ -614,3 +614,39 @@ end
     invalidate!(cache)
     @test factor_status(cache).kind == :unprepared
 end
+
+@testset "prepare_refinement! lifecycle contract" begin
+    p = 256
+    n = 8
+    rng = MersenneTwister(818)
+    A = _spd_fixture(n, p, rng)
+    b = owned_zeros(BigFloat, n; precision_bits = p)
+    for i in 1:n
+        b[i] = BigFloat(i; precision = p)
+    end
+    # use before prepare -> clear error
+    c = BFLACholeskyCache(NativeBackend())
+    @test_throws ArgumentError prepare_refinement!(c, b)
+    @test_throws ArgumentError prepare_refinement!(c, 1)
+    prepare!(c, n, p)
+    # now prepare_refinement! works with a Vector template
+    prepare_refinement!(c, b)
+    factorize!(c, A)
+    x = owned_zeros(BigFloat, n; precision_bits = p)
+    solve_trusted!(x, c, b)
+    r = refine_once!(c, A, x, b)
+    @test isfinite(r.backward_error_after)
+    # precision mismatch -> clear error
+    bp = owned_zeros(BigFloat, n; precision_bits = 128)
+    @test_throws PrecisionMismatch prepare_refinement!(c, bp)
+    # shape mismatch (rows) -> clear error
+    bw = owned_zeros(BigFloat, n + 1; precision_bits = p)
+    @test_throws DimensionMismatch prepare_refinement!(c, bw)
+    # shape change requires explicit re-prepare; refine_once! with a mismatched
+    # scratch shape throws rather than silently resizing.
+    prepare_refinement!(c, owned_zeros(BigFloat, n, 2; precision_bits = p))
+    @test_throws DimensionMismatch refine_once!(c, A, x, b)  # vector vs n×2 scratch
+    prepare_refinement!(c, b)  # restore vector scratch
+    r2 = refine_once!(c, A, x, b)
+    @test isfinite(r2.backward_error_after)
+end

@@ -205,6 +205,19 @@ mutable struct CacheRefineStorage
     precision_bits::Int
 end
 
+# Internal storage allocator used by `prepare!` and the public
+# `prepare_refinement!` checked wrappers. Does not itself require the cache to be
+# `prepare!`d (the public wrappers enforce that); it only allocates owned scratch
+# at the cache precision for the requested shape.
+function _prepare_refinement_storage!(cache::AbstractFactorCache, shape::Tuple)
+    cache.refine = CacheRefineStorage(
+        owned_zeros(BigFloat, shape...; precision_bits = cache.precision_bits),
+        owned_zeros(BigFloat, shape...; precision_bits = cache.precision_bits),
+        cache.precision_bits,
+    )
+    return cache
+end
+
 """
     prepare_refinement!(cache, nrhs=1) -> cache
     prepare_refinement!(cache, rhs_template) -> cache
@@ -214,32 +227,24 @@ Eagerly allocate the cache's owned residual/correction scratch so a subsequent
 `n × nrhs` (matrix RHS); the array form reserves the exact shape of
 `rhs_template` (a `Vector{BigFloat}` or `Matrix{BigFloat}`), so a Vector RHS and
 an `n×1` Matrix RHS are kept distinct and no `refine_once!` reallocates for the
-shape it was prepared for. It is also called by `prepare!` (with `nrhs`).
+shape it was prepared for. The cache must already be `prepare!`d; this is an
+explicit allocation entry point.
 """
 function prepare_refinement!(cache::AbstractFactorCache, nrhs::Int=1)
+    _cache_require_prepared(cache, "prepare_refinement!")
     nrhs >= 1 || throw(ArgumentError("prepare_refinement!: nrhs must be positive"))
-    n = cache.n
-    cache.refine = CacheRefineStorage(
-        owned_zeros(BigFloat, n, nrhs; precision_bits = cache.precision_bits),
-        owned_zeros(BigFloat, n, nrhs; precision_bits = cache.precision_bits),
-        cache.precision_bits,
-    )
-    return cache
+    return _prepare_refinement_storage!(cache, (cache.n, nrhs))
 end
 
-function prepare_refinement!(cache::AbstractFactorCache, rhs_template::AbstractArray{BigFloat})
+function prepare_refinement!(cache::AbstractFactorCache, rhs_template::AbstractVecOrMat{BigFloat})
+    _cache_require_prepared(cache, "prepare_refinement!")
     p = _require_precision(_check_precision(rhs_template), "prepare_refinement!")
     p == cache.precision_bits || throw(PrecisionMismatch(cache.precision_bits, p, nothing))
     size(rhs_template, 1) == cache.n || throw(DimensionMismatch(
         "prepare_refinement!: RHS rows ($(size(rhs_template, 1))) differ from " *
         "cache order $(cache.n)",
     ))
-    cache.refine = CacheRefineStorage(
-        owned_zeros(BigFloat, size(rhs_template)...; precision_bits = cache.precision_bits),
-        owned_zeros(BigFloat, size(rhs_template)...; precision_bits = cache.precision_bits),
-        cache.precision_bits,
-    )
-    return cache
+    return _prepare_refinement_storage!(cache, size(rhs_template))
 end
 
 
@@ -300,7 +305,7 @@ function prepare!(
     cache.scalars = CacheScalars(precision_bits)
     cache.workspace = BFLAWorkspace(precision_bits; workers = workspace_workers)
     cache.status = FactorStatus(:unprepared, nothing)
-    prepare_refinement!(cache, nrhs)
+    _prepare_refinement_storage!(cache, (n, nrhs))
     cache.prepared = true
     return cache
 end
@@ -611,7 +616,7 @@ function prepare!(
     cache.scalars = CacheScalars(precision_bits)
     cache.workspace = BFLAWorkspace(precision_bits; workers = workspace_workers)
     cache.status = FactorStatus(:unprepared, nothing)
-    prepare_refinement!(cache, nrhs)
+    _prepare_refinement_storage!(cache, (n, nrhs))
     cache.prepared = true
     return cache
 end
@@ -839,7 +844,7 @@ function prepare!(
     cache.scalars = CacheScalars(precision_bits)
     cache.workspace = BFLAWorkspace(precision_bits; workers = workspace_workers)
     cache.status = FactorStatus(:unprepared, nothing)
-    prepare_refinement!(cache, nrhs)
+    _prepare_refinement_storage!(cache, (n, nrhs))
     cache.prepared = true
     return cache
 end
@@ -1041,7 +1046,7 @@ function prepare!(
     cache.scalars = CacheScalars(precision_bits)
     cache.workspace = BFLAWorkspace(precision_bits; workers = workspace_workers)
     cache.status = FactorStatus(:unprepared, nothing)
-    prepare_refinement!(cache, nrhs)
+    _prepare_refinement_storage!(cache, (n, nrhs))
     cache.prepared = true
     return cache
 end

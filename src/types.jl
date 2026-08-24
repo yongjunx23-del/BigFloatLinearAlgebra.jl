@@ -43,6 +43,13 @@ Whether an operand is used as-is or transposed.
 """
 @enum TransposeOp NoTrans Trans
 
+"""`NoTrans`: use an operand directly (no transpose)."""
+NoTrans
+
+"""`Trans`: use the transpose of an operand."""
+Trans
+
+
 """
     Triangle
 
@@ -53,12 +60,26 @@ Which triangle of a symmetric or triangular matrix is authoritative.
 """
 @enum Triangle Lower Upper
 
+"""`Lower`: the lower triangle (`i >= j`) is authoritative."""
+Lower
+
+"""`Upper`: the upper triangle (`i <= j`) is authoritative."""
+Upper
+
+
 """
     Side
 
 Whether a triangular matrix is applied on the left or the right.
 """
 @enum Side LeftSide RightSide
+
+"""`LeftSide`: apply a triangular matrix on the left."""
+LeftSide
+
+"""`RightSide`: apply a triangular matrix on the right."""
+RightSide
+
 
 """
     DiagonalKind
@@ -69,6 +90,13 @@ Whether the diagonal of a triangular matrix is implicit unit or stored.
   * `NonUnitDiagonal`: the diagonal is read from storage.
 """
 @enum DiagonalKind UnitDiagonal NonUnitDiagonal
+
+"""`UnitDiagonal`: the diagonal of a triangular matrix is implicit unit."""
+UnitDiagonal
+
+"""`NonUnitDiagonal`: the diagonal of a triangular matrix is read from storage."""
+NonUnitDiagonal
+
 
 """
     capabilities(backend) -> NamedTuple
