@@ -1,17 +1,17 @@
 BFLA reusable-cache hot-path audit (Native backend, warm, apple-m4, Julia 1.12.6)
-Cholesky and LU caches: factorize, solve, and full factor-solve cycle allocate 0 Julia bytes
-at 128/256/512 bits and sizes 8/32/128. RSS deltas across repeated cycles are 0 (stable),
-so no new native (MPFR) blocks are retained.
+Trusted path (solve_trusted!): Cholesky and LU factorize, solve, and full
+factor-solve cycle allocate 0 Julia bytes at 128/256/512 bits and sizes 8/32/128.
+RSS deltas across repeated cycles are 0 (stable), so no new native (MPFR) blocks
+are retained. The checked solve! (solve! ) re-owns its destination by design and
+is therefore allocating; use solve_trusted! with an owned destination for the
+zero-allocation hot path. LDLT/RRQR trusted solves are also zero-alloc; their
+factorize! still allocates pivot/tau metadata (documented).
 
-  cholesky 128  8   solve=0 factorize=0 cycle=0  median_s=3.06e-5 rss=0
-  lu       128  8   solve=0 factorize=0 cycle=0  median_s=2.60e-5 rss=0
-  cholesky 128  32  solve=0 factorize=0 cycle=0  median_s=3.87e-4 rss=0
-  lu       128  32  solve=0 factorize=0 cycle=0  median_s=5.11e-4 rss=0
-  cholesky 128  128 solve=0 factorize=0 cycle=0  median_s=1.75e-2 rss=0
-  lu       128  128 solve=0 factorize=0 cycle=0  median_s=3.09e-2 rss=0
-  cholesky 256  128 solve=0 factorize=0 cycle=0  median_s=2.55e-2 rss=0
-  lu       256  128 solve=0 factorize=0 cycle=0  median_s=4.48e-2 rss=0
-  cholesky 512  128 solve=0 factorize=0 cycle=0  median_s=3.24e-2 rss=0
-  lu       512  128 solve=0 factorize=0 cycle=0  median_s=6.08e-2 rss=0
-LDLT/RRQR solve paths are zero-alloc; their factorize reuses the allocating
-reference kernels for pivot/tau metadata and is documented as allocating.
+  cholesky 128  8    solve=0 factorize=0 cycle=0 rss=0
+  lu       128  8    solve=0 factorize=0 cycle=0 rss=0
+  cholesky 128  128  solve=0 factorize=0 cycle=0 rss=0  (median 18.2 ms)
+  lu       128  128  solve=0 factorize=0 cycle=0 rss=0  (median 33.1 ms)
+  cholesky 256  128  solve=0 factorize=0 cycle=0 rss=0  (median 26.5 ms)
+  lu       256  128  solve=0 factorize=0 cycle=0 rss=0  (median 45.0 ms)
+  cholesky 512  128  solve=0 factorize=0 cycle=0 rss=0  (median 37.9 ms)
+  lu       512  128  solve=0 factorize=0 cycle=0 rss=0  (median 59.2 ms)

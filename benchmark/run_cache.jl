@@ -47,24 +47,24 @@ end
 function measure_cache(name, p, cache, A, B)
     x = BFLA.owned_zeros(BigFloat, size(B)...; precision_bits = p)
     BFLA.factorize!(cache, A)
-    BFLA.solve!(x, cache, B)
+    BFLA.solve_trusted!(x, cache, B)
     for _ in 1:WARMUP
         BFLA.factorize!(cache, A)
-        BFLA.solve!(x, cache, B)
+        BFLA.solve_trusted!(x, cache, B)
     end
     rss_before = Int(Sys.maxrss())
-    solve_alloc = @allocated BFLA.solve!(x, cache, B)
+    solve_alloc = @allocated BFLA.solve_trusted!(x, cache, B)
     factor_alloc = @allocated BFLA.factorize!(cache, A)
     cycle_alloc = @allocated begin
         BFLA.factorize!(cache, A)
-        BFLA.solve!(x, cache, B)
+        BFLA.solve_trusted!(x, cache, B)
     end
     times = Vector{Float64}(undef, SAMPLES)
     for s in 1:SAMPLES
         GC.gc()
         times[s] = @elapsed begin
             BFLA.factorize!(cache, A)
-            BFLA.solve!(x, cache, B)
+            BFLA.solve_trusted!(x, cache, B)
         end
     end
     rss_after = Int(Sys.maxrss())
