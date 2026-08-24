@@ -4,7 +4,6 @@ using BigFloatLinearAlgebra
 makedocs(;
     sitename = "BigFloatLinearAlgebra.jl",
     modules = [BigFloatLinearAlgebra],
-    strict = false,
     checkdocs = :none,
     pages = [
         "Home" => "index.md",
