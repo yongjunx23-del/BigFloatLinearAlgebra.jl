@@ -258,4 +258,36 @@ using SciMLBase
         end
     end
 
+
+    @testset "adapter re-owns a same-array shared re-fill" begin
+        setprecision(BigFloat, 128) do
+            p = 128
+            A = BFLA.owned_zeros(BigFloat, 2, 2; precision_bits = p)
+            A[1, 1] = BigFloat(4; precision = p)
+            A[1, 2] = BigFloat(1; precision = p)
+            A[2, 1] = BigFloat(2; precision = p)
+            A[2, 2] = BigFloat(3; precision = p)
+            b = BFLA.owned_zeros(BigFloat, 2; precision_bits = p)
+            b[1] = BigFloat(9; precision = p)
+            b[2] = BigFloat(11; precision = p)
+            cache = LinearSolve.init(LinearSolve.LinearProblem(A, b), BFLA.BigFloatLU())
+            sol = LinearSolve.solve!(cache)
+            @test SciMLBase.successful_retcode(sol)
+            @test is_independently_owned(sol.u)
+            # Re-fill the SAME solution array with a shared BigFloat object at the
+            # same precision. The adapter must re-own it so the trusted solve does
+            # not silently collapse to a shared-object result.
+            shared = BigFloat(0; precision = p)
+            for i in eachindex(cache.u)
+                cache.u[i] = shared
+            end
+            @test !is_independently_owned(cache.u)
+            sol2 = LinearSolve.solve!(cache)
+            @test SciMLBase.successful_retcode(sol2)
+            @test is_independently_owned(sol2.u)
+            @test BFLA.norminf(Native, A * sol2.u - b) <=
+                BigFloat(200; precision = p) * eps(BigFloat)
+        end
+    end
+
 end

@@ -1,8 +1,10 @@
 # Merge Review — `refactor/owned-factor-cache` → `main` (0.2.0)
 
-*Status: evidence for PR #5. Objective summary of the final tested state; not a
-living source-of-truth contract — see the CHANGELOG and `docs/src/` for the
-maintained contract.*
+*Status: historical evidence. PR #5 was merged; this documents the follow-up
+round (refine checked/trusted split, metadata stale-state guards, strict
+refinement scratch, LinearSolve ownership probe, all-cache allocation gates).
+Not a living source-of-truth contract — see the CHANGELOG and `docs/src/` for
+the maintained contract.*
 
 ## Scope
 

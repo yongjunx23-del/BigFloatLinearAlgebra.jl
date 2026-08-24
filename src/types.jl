@@ -179,11 +179,12 @@ end
     FactorStatus
 
 Machine-readable result of a factorization. `kind` is one of the symbols
-`:success`, `:not_positive_definite`, `:nonfinite`, `:singular`, or
-`:pivot_failure`; `position` is an optional 1-based pivot/failure position
-(`nothing` when it does not apply). This replaces the previous ambiguous
-integer sentinels (such as `-1` for a non-finite triangle) so that Cholesky,
-LDLᵀ, QR, and LU factors share one stable, extensible protocol.
+`:success`, `:not_positive_definite`, `:nonfinite`, `:singular`,
+`:pivot_failure`, or `:unprepared` (a factor cache that has not been
+`prepare!`d, or has been `invalidate!`d); `position` is an optional 1-based
+pivot/failure position (`nothing` when it does not apply). This replaces the
+previous ambiguous integer sentinels (such as `-1` for a non-finite triangle) so
+that Cholesky, LDLᵀ, QR, and LU factors share one stable, extensible protocol.
 """
 struct FactorStatus
     kind::Symbol

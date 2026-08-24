@@ -1,12 +1,16 @@
 # Precision-specific reusable factor caches.
 #
 # A cache owns every mutable BigFloat destination it uses: the factor matrix,
-# per-worker scalar accumulators, and the metadata arrays. `prepare!` is the only
-# place storage is (re)allocated; changing the precision or size is an explicit
-# `prepare!` act, never something that happens inside the hot loops. After
-# warm-up, `factorize!`, `solve!`, residual and refinement paths write into the
-# cache's existing BigFloat destinations rather than replacing elements, so
-# object identity is preserved and no new Julia objects are allocated.
+# per-worker scalar accumulators, and the metadata arrays. `prepare!` and
+# `prepare_refinement!` are the allocation entry points; changing the precision
+# or size is an explicit preparation act, never something that happens inside the
+# hot loops. After warm-up, the *trusted* hot path (`factorize!` for Native
+# Cholesky/LU, and `solve_trusted!` for all four caches) writes into the cache's
+# existing BigFloat destinations rather than replacing elements, so object
+# identity is preserved and no new Julia objects are allocated. The checked
+# `solve!` re-owns its destination (allocating by design), and refinement
+# (`refine_once!`/`refine_once_trusted!`) is allocation-light, not
+# zero-allocation.
 #
 # Caches mirror the field names of the corresponding allocating factor structs so
 # the solver-grade kernels (`_cholesky_solve!`, `_ldlt_solve_common!`,
