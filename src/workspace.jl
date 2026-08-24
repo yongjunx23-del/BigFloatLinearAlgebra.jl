@@ -68,7 +68,17 @@ function _workspace_identity_buffer(
     return nothing
 end
 
+"""
+    workspace_precision(ws) -> Int
+
+The MPFR precision (bits) that the workspace reserves.
+"""
 workspace_precision(ws::BFLAWorkspace) = ws.precision_bits
+"""
+    workspace_workers(ws) -> Int
+
+The number of worker slots the workspace reserves.
+"""
 workspace_workers(ws::BFLAWorkspace) = ws.workers
 
 function _validate_solve_workspace(

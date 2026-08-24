@@ -1,3 +1,10 @@
+"""
+    BigFloatLinearAlgebra
+
+Ownership-safe dense linear algebra for `BigFloat` / MPFR, with explicit
+precision, Native and Generic backends, level 1–3 kernels, dense factorizations,
+reusable factor caches, and a solver-independent residual/refinement API.
+"""
 module BigFloatLinearAlgebra
 
 import LinearAlgebra
@@ -210,6 +217,7 @@ export AbstractBFLABackend,
     higher_precision_residual!,
     refinement_correction!,
     refine_once!,
+    refine_once_trusted!,
     invalidate!,
     ldiv!,
     ldiv_trusted!,

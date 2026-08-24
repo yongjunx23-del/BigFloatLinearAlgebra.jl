@@ -14,6 +14,12 @@ matrix is owned by the cache and reused across right-hand-side-only updates
 until LinearSolve marks the cache fresh again. After mutating `A` in place,
 assign it back to `cache.A` or call `reinit!(cache; A = A)` so the cache
 re-factorizes into the *same* owned storage (no factor deep-copy).
+
+**RHS-shape lifecycle:** within one cache lifetime the RHS container dimension
+and column count are fixed (LinearSolve sizes `cache.u` once). RHS *values* may
+be updated, and `A` may be refreshed, but changing the RHS shape or column count
+(e.g. vector → matrix) or the precision requires a fresh `LinearSolve.init` /
+`reinit!` that re-shapes `cache.u`.
 """
 struct BigFloatLU{B<:BFLA.AbstractBFLABackend} <:
     LinearSolve.SciMLLinearSolveAlgorithm
@@ -68,9 +74,10 @@ mutable struct _BFLALinearCache{C<:BFLA.AbstractFactorCache}
     u_array_id::UInt
     u_shape::Tuple
     u_precision::Int
+    u_ids::Union{Nothing,Vector{UInt}}
 end
 
-_BFLALinearCache{C}() where {C} = _BFLALinearCache{C}(nothing, false, 0, (), 0)
+_BFLALinearCache{C}() where {C} = _BFLALinearCache{C}(nothing, false, 0, (), 0, nothing)
 
 function LinearSolve.init_cacheval(
         alg::BigFloatLU, A, b, u, Pl, Pr, maxiters::Int, abstol, reltol,
@@ -146,28 +153,59 @@ function _ensure_factorized!(cache::_BFLALinearCache, alg, A, b)
     return c
 end
 
+# Detect, without allocating, whether `u` has two slots referencing the same
+# BigFloat object (e.g. after `fill!(u, shared)`). Uses the adapter's
+# preallocated objectid buffer so the steady RHS-only path allocates nothing.
+function _has_shared_elements!(u, idbuf::Union{Nothing,Vector{UInt}})
+    n = length(u)
+    if idbuf === nothing || length(idbuf) < n
+        idbuf = Vector{UInt}(undef, n)
+    end
+    @inbounds for i in 1:n
+        idbuf[i] = objectid(u[i])
+    end
+    sort!(view(idbuf, 1:n))
+    @inbounds for i in 2:n
+        idbuf[i] == idbuf[i - 1] && return true
+    end
+    return false
+end
+
 # Re-verify the LinearSolve solution `cache.u` against the adapter's recorded
-# shape, precision, and array identity. If the array was replaced, reshaped, or
-# re-precisioned (e.g. `reinit!`, vector->matrix, 128->256 bit), re-own every
-# slot so the trusted `solve_trusted!` path never writes into shared `fill!`
-# storage. On the steady repeated-solve path nothing changes and nothing
-# allocates.
+# shape, precision, and array identity. If the array was replaced, reshaped,
+# re-precisioned, or re-filled to shared BigFloat objects, re-own every slot so
+# the trusted `solve_trusted!` path never writes into shared `fill!` storage.
+# On the steady repeated-solve path nothing changes and nothing allocates.
 function _ensure_solution_owned!(state::_BFLALinearCache, u, p::Int)
     p_u = try
         BFLA._require_precision(BFLA._check_precision(u), "LinearSolve u")
-    catch
-        -1
+    catch e
+        # Only a precision-consistency failure is treated as "unknown" (so we
+        # re-own); interrupts, OOM, and genuine bugs must propagate.
+        e isa Union{BFLA.PrecisionMismatch,ArgumentError} ? -1 : rethrow()
     end
     if !state.u_ready || objectid(u) != state.u_array_id ||
             size(u) != state.u_shape || p_u != state.u_precision ||
             state.u_precision != p
-        @inbounds for index in eachindex(u)
-            u[index] = BigFloat(0; precision = p)
-        end
-        state.u_ready = true
-        state.u_array_id = objectid(u)
-        state.u_shape = size(u)
-        state.u_precision = p
+        _reown_solution!(state, u, p)
+    elseif _has_shared_elements!(u, state.u_ids)
+        # Same array, same shape/precision, but the caller re-filled it with a
+        # shared BigFloat object -> re-own so the trusted solve is safe.
+        _reown_solution!(state, u, p)
+    end
+    return nothing
+end
+
+function _reown_solution!(state::_BFLALinearCache, u, p::Int)
+    @inbounds for index in eachindex(u)
+        u[index] = BigFloat(0; precision = p)
+    end
+    state.u_ready = true
+    state.u_array_id = objectid(u)
+    state.u_shape = size(u)
+    state.u_precision = p
+    if state.u_ids === nothing || length(state.u_ids) < length(u)
+        state.u_ids = Vector{UInt}(undef, length(u))
     end
     return nothing
 end

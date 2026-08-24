@@ -234,6 +234,7 @@ end
     b = _rhs(A, x0, p)
     c = BFLACholeskyCache(NativeBackend())
     prepare!(c, n, p)
+    prepare_refinement!(c, b)   # vector-RHS scratch shape
     factorize!(c, A)
     x = owned_zeros(BigFloat, n; precision_bits = p)
     solve!(x, c, b)
@@ -282,6 +283,28 @@ end
     end
     @test @allocated(solve_trusted!(x, cc, b)) == 0
     @test @allocated(factorize!(cc, Aspd)) == 0
+    @test @allocated(begin factorize!(cc, Aspd); solve_trusted!(x, cc, b); end) == 0
+
+    # LDLT and RRQR: trusted solve is zero-allocation; their factorize! may
+    # allocate pivot/tau metadata (not gated to zero).
+    Aind = _indefinite_fixture(n, p, rng)
+    cl = BFLALDLTCache(NativeBackend())
+    prepare!(cl, n, p)
+    factorize!(cl, Aind)
+    solve_trusted!(x, cl, b)
+    for _ in 1:5
+        solve_trusted!(x, cl, b)
+    end
+    @test @allocated(solve_trusted!(x, cl, b)) == 0
+
+    cq = BFLARRQRCache(NativeBackend())
+    prepare!(cq, n, p)
+    factorize!(cq, A)
+    solve_trusted!(x, cq, b)
+    for _ in 1:5
+        solve_trusted!(x, cq, b)
+    end
+    @test @allocated(solve_trusted!(x, cq, b)) == 0
 end
 
 @testset "cache Native/Generic numerical cross-check" begin
@@ -405,6 +428,7 @@ end
     end
     c = BFLACholeskyCache(NativeBackend())
     prepare!(c, n, p; nrhs = 1)
+    prepare_refinement!(c, b)   # vector-RHS scratch shape
     @test c.refine !== nothing   # prepare_refinement! ran eagerly
     factorize!(c, A)
     x = owned_zeros(BigFloat, n; precision_bits = p)
@@ -420,5 +444,209 @@ end
     x2 = owned_zeros(BigFloat, n; precision_bits = p)
     solve_trusted!(x2, c, b)
     r2 = refine_once!(c, A, x2, b)
+    @test isfinite(r2.backward_error_after)
+end
+
+@testset "solve_trusted! rejects aliasing against factor and RHS" begin
+    p = 256
+    n = 8
+    rng = MersenneTwister(2024)
+    b = owned_zeros(BigFloat, n; precision_bits = p)
+    for i in 1:n
+        b[i] = BigFloat(i; precision = p)
+    end
+    for (ctor, kind) in (
+        (BFLACholeskyCache, :cholesky),
+        (BFLALUCache, :lu),
+        (BFLALDLTCache, :ldlt),
+        (BFLARRQRCache, :rrqr),
+    )
+        A = kind == :cholesky ? _spd_fixture(n, p, rng) :
+            kind == :ldlt ? _indefinite_fixture(n, p, rng) :
+            _square_fixture(n, p, rng)
+        c = ctor(NativeBackend())
+        prepare!(c, n, p)
+        factorize!(c, A)
+        @test issuccess(c)
+        x = owned_zeros(BigFloat, n; precision_bits = p)
+        # x aliases a column of the factor matrix -> must be rejected.
+        x_alias = view(factor_matrix(c), :, 1)
+        @test_throws ArgumentError solve_trusted!(x_alias, c, b)
+        # x aliases the RHS -> must be rejected.
+        @test_throws ArgumentError solve_trusted!(b, c, b)
+        # a correct owned destination solves fine.
+        solve_trusted!(x, c, b)
+        @test isfinite(_backward_error(A, x, b, p))
+    end
+end
+
+@testset "metadata accessors are invalid after invalidate!/failure" begin
+    p = 256
+    n = 8
+    rng = MersenneTwister(77)
+    A = _square_fixture(n, p, rng)
+    b = owned_zeros(BigFloat, n; precision_bits = p)
+    for i in 1:n
+        b[i] = BigFloat(i; precision = p)
+    end
+    c = BFLALUCache(NativeBackend())
+    prepare!(c, n, p)
+    factorize!(c, A)
+    @test issuccess(c)
+    @test factor_perm(c) == factor_perm(c)
+    @test haskey(factor_diagnostics(c), :permutation)
+    # after invalidate!: metadata accessors must throw, not return stale values
+    invalidate!(c)
+    @test_throws ArgumentError factor_perm(c)
+    @test_throws ArgumentError factor_diagnostics(c)
+    # after a non-finite input, status is nonfinite and metadata accessors throw
+    factorize!(c, A)
+    Anan = owned_copy(A)
+    Anan[1, 1] = BigFloat(NaN; precision = p)
+    factorize!(c, Anan)
+    @test !issuccess(c)
+    @test factor_status(c).kind == :nonfinite
+    @test_throws ArgumentError factor_perm(c)
+    @test_throws ArgumentError factor_diagnostics(c)
+end
+
+@testset "refinement allocation contract is honest" begin
+    # refine_once! is allocation-light, NOT zero-allocation: it still builds fresh
+    # BigFloat constants/scratch via the generic residual!/normwise_backward_error
+    # path. We assert a bound (not == 0) so a regression that balloons allocation
+    # is caught while the honest contract is recorded.
+    p = 256
+    n = 16
+    rng = MersenneTwister(31337)
+    A = _spd_fixture(n, p, rng)
+    b = owned_zeros(BigFloat, n; precision_bits = p)
+    for i in 1:n
+        b[i] = BigFloat(rand(rng, -1024:1024); precision = p)
+    end
+    c = BFLACholeskyCache(NativeBackend())
+    prepare!(c, n, p; nrhs = 1)
+    prepare_refinement!(c, b)
+    factorize!(c, A)
+    x = owned_zeros(BigFloat, n; precision_bits = p)
+    solve_trusted!(x, c, b)
+    for _ in 1:20
+        refine_once!(c, A, x, b)
+    end
+    alloc = @allocated refine_once!(c, A, x, b)
+    @test alloc >= 0
+    @test alloc < 20000  # allocation-light bound; refinement is NOT zero-alloc
+    # storage object identity is preserved across refine_once!
+    storage_before = c.refine
+    refine_once!(c, A, x, b)
+    @test c.refine === storage_before
+end
+
+@testset "refine_once! and refine_once_trusted! reject alias and repair ownership" begin
+    p = 256
+    n = 8
+    rng = MersenneTwister(4242)
+    A = _spd_fixture(n, p, rng)
+    b = owned_zeros(BigFloat, n; precision_bits = p)
+    for i in 1:n
+        b[i] = BigFloat(rand(rng, -1024:1024); precision = p)
+    end
+    c = BFLACholeskyCache(NativeBackend())
+    prepare!(c, n, p; nrhs = 1)
+    prepare_refinement!(c, b)
+    factorize!(c, A)
+    x = owned_zeros(BigFloat, n; precision_bits = p)
+    solve_trusted!(x, c, b)
+
+    # x aliases the factor matrix column -> both checked and trusted reject.
+    x_alias = view(factor_matrix(c), :, 1)
+    @test_throws ArgumentError refine_once!(c, A, x_alias, b)
+    @test_throws ArgumentError refine_once_trusted!(c, A, x_alias, b)
+    # x aliases the RHS -> both reject.
+    @test_throws ArgumentError refine_once!(c, A, b, b)
+    @test_throws ArgumentError refine_once_trusted!(c, A, b, b)
+    # a shared-element x is safely repaired by the checked path and rejected by
+    # the trusted path (which requires independent ownership).
+    x_shared = fill!(Array{BigFloat}(undef, n), BigFloat(0; precision = p))
+    report = refine_once!(c, A, x_shared, b)   # repaired safely
+    @test is_independently_owned(x_shared)
+    @test isfinite(report.backward_error_after)
+    # trusted path on an owned, correct-precision x works.
+    x2 = owned_zeros(BigFloat, n; precision_bits = p)
+    solve_trusted!(x2, c, b)
+    r2 = refine_once_trusted!(c, A, x2, b)
+    @test isfinite(r2.backward_error_after)
+    # scratch shape mismatch throws (no silent re-resize): prepare for a matrix,
+    # then refine with the vector RHS.
+    cm = BFLACholeskyCache(NativeBackend())
+    prepare!(cm, n, p; nrhs = 2)
+    prepare_refinement!(cm, owned_zeros(BigFloat, n, 2; precision_bits = p))
+    factorize!(cm, A)
+    xm = owned_zeros(BigFloat, n; precision_bits = p)
+    solve_trusted!(xm, cm, b)
+    @test_throws DimensionMismatch refine_once!(cm, A, xm, b)  # vector vs n×2 scratch
+end
+
+@testset "README reusable-cache example runs" begin
+    import MutableArithmetics as MA
+    n, p = 32, 256
+    A = owned_zeros(BigFloat, n, n; precision_bits = p)
+    for j in 1:n, i in 1:n
+        A[i, j] = BigFloat(i == j ? n - i + 8 : (i + j) % 5 + 1; precision = p)
+    end
+    for i in 1:n
+        MA.operate!(+, A[i, i], BigFloat(n; precision = p))
+    end
+    b = owned_zeros(BigFloat, n; precision_bits = p)
+    for i in 1:n
+        b[i] = BigFloat(i + 1; precision = p)
+    end
+    cache = BFLACholeskyCache(NativeBackend())
+    prepare!(cache, n, p; nrhs = 1)
+    factorize!(cache, A)
+    @test issuccess(cache)
+    x = owned_zeros(BigFloat, n; precision_bits = p)
+    solve_trusted!(x, cache, b)
+    @test isfinite(_backward_error(A, x, b, p))
+    x2 = owned_zeros(BigFloat, n; precision_bits = p)
+    fill!(x2, BigFloat(0; precision = p))
+    solve!(x2, cache, b)
+    @test isfinite(_backward_error(A, x2, b, p))
+    invalidate!(cache)
+    @test factor_status(cache).kind == :unprepared
+end
+
+@testset "prepare_refinement! lifecycle contract" begin
+    p = 256
+    n = 8
+    rng = MersenneTwister(818)
+    A = _spd_fixture(n, p, rng)
+    b = owned_zeros(BigFloat, n; precision_bits = p)
+    for i in 1:n
+        b[i] = BigFloat(i; precision = p)
+    end
+    # use before prepare -> clear error
+    c = BFLACholeskyCache(NativeBackend())
+    @test_throws ArgumentError prepare_refinement!(c, b)
+    @test_throws ArgumentError prepare_refinement!(c, 1)
+    prepare!(c, n, p)
+    # now prepare_refinement! works with a Vector template
+    prepare_refinement!(c, b)
+    factorize!(c, A)
+    x = owned_zeros(BigFloat, n; precision_bits = p)
+    solve_trusted!(x, c, b)
+    r = refine_once!(c, A, x, b)
+    @test isfinite(r.backward_error_after)
+    # precision mismatch -> clear error
+    bp = owned_zeros(BigFloat, n; precision_bits = 128)
+    @test_throws PrecisionMismatch prepare_refinement!(c, bp)
+    # shape mismatch (rows) -> clear error
+    bw = owned_zeros(BigFloat, n + 1; precision_bits = p)
+    @test_throws DimensionMismatch prepare_refinement!(c, bw)
+    # shape change requires explicit re-prepare; refine_once! with a mismatched
+    # scratch shape throws rather than silently resizing.
+    prepare_refinement!(c, owned_zeros(BigFloat, n, 2; precision_bits = p))
+    @test_throws DimensionMismatch refine_once!(c, A, x, b)  # vector vs n×2 scratch
+    prepare_refinement!(c, b)  # restore vector scratch
+    r2 = refine_once!(c, A, x, b)
     @test isfinite(r2.backward_error_after)
 end

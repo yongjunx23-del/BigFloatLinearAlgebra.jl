@@ -104,6 +104,12 @@ function factor_Rdiag(F::BFLAQRFactor)
     ]
 end
 
+"""
+    factor_tolerance(F) -> BigFloat
+
+The absolute RRQR rank tolerance (the 0.1.0 spelling; alias of
+[`factor_rank_atol`](@ref)).
+"""
 factor_tolerance(F::BFLAQRFactor) = MA.mutable_copy(F.tolerance)
 
 """
@@ -454,43 +460,50 @@ _apply_q!(
     F,
     B::AbstractVecOrMat{BigFloat},
     trans::TransposeOp,
-) = _apply_q_common!(F, B, trans)
+    workspace::Union{Nothing,BFLAWorkspace}=nothing,
+    workspace_worker::Int=1,
+) = _apply_q_common!(F, B, trans, workspace, workspace_worker)
 
 _apply_q!(
     ::GenericBackend,
     F,
     B::AbstractVecOrMat{BigFloat},
     trans::TransposeOp,
-) = _apply_q_common!(F, B, trans)
+    workspace::Union{Nothing,BFLAWorkspace}=nothing,
+    workspace_worker::Int=1,
+) = _apply_q_common!(F, B, trans, workspace, workspace_worker)
 
 function _apply_q_common!(
     F,
     B::AbstractVecOrMat{BigFloat},
     trans::TransposeOp,
+    workspace::Union{Nothing,BFLAWorkspace}=nothing,
+    workspace_worker::Int=1,
 )
     p = F.precision_bits
     A = F.factors
     m = size(A, 1)
     r = length(F.tau)
-    R = reshape(B, m, :)
-    acc = BigFloat(0; precision = p)
-    buf = BigFloat(0; precision = p)
+    nrhs = length(B) ÷ m
+    acc = _solve_scratch(workspace, workspace_worker, 1, p)
+    buf = _solve_scratch(workspace, workspace_worker, 2, p)
     krange = trans === NoTrans ? (r:-1:1) : (1:r)
     @inbounds for k in krange
         tau = F.tau[k]
-        for j in axes(R, 2)
+        for j in 1:nrhs
+            base = (j - 1) * m
             MA.operate!(zero, acc)
-            MA.operate_to!(acc, copy, R[k, j])  # v[1]=1 contributes B[k,j]
+            MA.operate_to!(acc, copy, B[base + k])  # v[1]=1 contributes B[k,j]
             for i in (k + 1):m
-                MA.buffered_operate!(buf, MA.add_mul, acc, A[i, k], R[i, j])
+                MA.buffered_operate!(buf, MA.add_mul, acc, A[i, k], B[base + i])
             end
             # acc = vᵀ B[:,j]; B[k:m,j] -= tau*acc*v
             MA.operate_to!(acc, *, acc, tau)
             MA.operate_to!(buf, copy, acc)      # v[1]=1
-            MA.operate_to!(R[k, j], -, R[k, j], buf)
+            MA.operate_to!(B[base + k], -, B[base + k], buf)
             for i in (k + 1):m
                 MA.operate_to!(buf, *, acc, A[i, k])
-                MA.operate_to!(R[i, j], -, R[i, j], buf)
+                MA.operate_to!(B[base + i], -, B[base + i], buf)
             end
         end
     end
@@ -585,7 +598,7 @@ function _qr_solve_common!(
     m, n = size(F.factors)
     # y = Qᵀ rhs. This remains an explicit dispatch through the factor's
     # recorded backend even though Native and Generic share the arithmetic.
-    _apply_q!(F.backend, F, rhs, Trans)
+    _apply_q!(F.backend, F, rhs, Trans, workspace, workspace_worker)
     # Solve R[1:r,1:r] x1 = y[1:r]; x = P*x1. For a rank-deficient
     # overdetermined system, free variables in pivot order are set to zero.
     r = F.rank
@@ -597,8 +610,9 @@ function _qr_solve_common!(
         owned_zeros(BigFloat, n; precision_bits=p) :
         workspace_buffer!(workspace, workspace_worker, n)
     x = view(storage, 1:n)
-    R = reshape(rhs, m, :)
-    @inbounds for col in axes(R, 2)
+    nrhs = length(rhs) ÷ m
+    @inbounds for col in 1:nrhs
+        base = (col - 1) * m
         for i in 1:n
             MA.operate!(zero, x[i])
         end
@@ -607,11 +621,11 @@ function _qr_solve_common!(
             for k in (i + 1):r
                 MA.buffered_operate!(buf, MA.add_mul, acc, A[i, k], x[k])
             end
-            MA.operate_to!(acc, -, R[i, col], acc)
+            MA.operate_to!(acc, -, rhs[base + i], acc)
             _mpfr_div!(x[i], acc, A[i, i])
         end
         for i in 1:n
-            MA.operate_to!(R[F.jpvt[i], col], copy, x[i])
+            MA.operate_to!(rhs[base + F.jpvt[i]], copy, x[i])
         end
     end
     return rhs

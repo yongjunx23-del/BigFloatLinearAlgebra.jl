@@ -17,7 +17,7 @@ All notable changes to this project are documented here. The format is based on
 - A checked `solve!(x, cache, b)` (re-owns a shared/ambient-precision
   destination safely) and a solver-facing `solve_trusted!(x, cache, b)` that is
   the zero-allocation hot path for an already-owned destination.
-- Zero-Julia-allocation Native Cholesky and LU `factorize!`/`solve!`/full-cycle
+- Zero-Julia-allocation Native Cholesky and LU `factorize!` + `solve_trusted!` full-cycle
   hot paths after warm-up (verified across 128/256/512 bit and sizes 8/32/128).
 - LinearSolve.jl adapter rebuilt directly on the reusable factor cache: an
   RHS-only solve allocates no new `BigFloat` element and a matrix refresh
@@ -39,6 +39,30 @@ All notable changes to this project are documented here. The format is based on
   storage; the cache `refine_once!` no longer accepts a silently-ignored
   `residual_precision` keyword (cache refinement is factor-precision-only).
 - Version is planned as **0.2.0** (new public API).
+
+### Changed (follow-up)
+
+- Added `refine_once_trusted!` (solver-facing) alongside the checked
+  `refine_once!`; both reject solution aliasing against the factor and the RHS,
+  and the checked path re-owns a shared/ambient-precision destination safely.
+- `prepare_refinement!(cache, rhs_template)` preserves the exact RHS shape
+  (Vector vs `n×1` vs `n×k` Matrix); `refine_once!` throws on a prepared-scratch
+  shape mismatch instead of silently resizing.
+- All four caches' trusted `solve_trusted!` are now zero-Julia-allocation after
+  warm-up (LDLT and RRQR included); a bounded gate records that `refine_once!`
+  is allocation-light, not zero.
+- Metadata accessors (`factor_pivots`, `factor_perm`, `factor_blocks`,
+  `factor_inertia`, `factor_rank`, `factor_jpvt`, `factor_Rdiag`,
+  `factor_rank_atol/rtol/scale/threshold`, `factor_diagnostics`) throw after
+  `invalidate!`/failed factorization instead of returning stale metadata.
+- LinearSolve adapter re-owns `cache.u` on a same-array shared re-fill and
+  rethrows interrupts/out-of-memory (only precision errors are handled).
+- `prepare_refinement!` is now a checked public API: it requires a prepared
+  cache, accepts only `AbstractVecOrMat{BigFloat}` templates, and throws a clear
+  error on use-before-prepare, precision, or shape mismatch (no silent resize).
+- A canonical `docs/src/reference.md` API reference (via `@autodocs`) documents
+  every exported binding; `makedocs(checkdocs = :exports)` enforces it.
+
 
 ### Known limitations
 

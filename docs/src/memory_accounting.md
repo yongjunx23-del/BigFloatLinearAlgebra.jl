@@ -18,26 +18,35 @@ factor matrix and the scalar accumulators is retained and reused.
 
 ## Measured hot-path profile (Native backend, warm)
 
-Single-call allocations after warm-up, `n = 32`, `precision = 256`:
+Single-call allocations after warm-up, `n = 32`, `precision = 256`. The
+zero-allocation path is the *trusted* solve (`solve_trusted!`) on an
+already-owned destination; the checked `solve!` intentionally re-owns the
+destination and allocates by design.
 
-| operation              | Julia bytes |
-|------------------------|-------------|
-| `factorize!` (Cholesky)| 0           |
-| `solve!` (Cholesky)    | 0           |
-| `factorize!` (LU)      | 0           |
-| `solve!` (LU)          | 0           |
-| `factorize!` (LDLT)    | allocates its metadata (see below) |
-| `solve!` (LDLT)        | 0           |
-| `factorize!` (RRQR)    | allocates its metadata (see below) |
-| `solve!` (RRQR)        | 0           |
+| operation                       | Julia bytes |
+|---------------------------------|-------------|
+| `factorize!` (Cholesky)         | 0           |
+| `solve_trusted!` (Cholesky)     | 0           |
+| `factorize!` (LU)               | 0           |
+| `solve_trusted!` (LU)           | 0           |
+| `factorize!` (LDLT)             | allocates its metadata (see below) |
+| `solve_trusted!` (LDLT)         | 0           |
+| `factorize!` (RRQR)             | allocates its metadata (see below) |
+| `solve_trusted!` (RRQR)         | 0           |
+| `refine_once!` (all caches)     | allocation-light, **not** zero (see below) |
 
 LDL and RRQR factorization currently reuse the allocating reference kernels for
 their pivot/metadata output (`perm`, `blocks`, `tau`, `jpvt`). Their trusted
 `solve_trusted!` paths and the Cholesky/LU factorization/solve paths are
-zero-allocation. This is a documented, reproducible limitation rather than a
-hidden allocation. The checked `solve!(x, cache, b)` intentionally re-owns the
-destination and therefore allocates by design; use `solve_trusted!` on the hot
-path with an already-owned destination.
+zero-allocation. The checked `solve!(x, cache, b)` intentionally re-owns the
+destination and therefore allocates by design.
+
+`refine_once!` is **allocation-light, not zero-allocation**: the cache refinement
+step still calls the generic `residual!` / `normwise_backward_error` / `_axpy!`
+paths, which build fresh `BigFloat` constants and scalar scratch on each call
+(order ~1–3 KB for a size-32 vector at 256 bit). This is honest and reproducible
+(it is asserted with a bounded gate in `test/caches.jl`); refinement is not
+claimed to be zero-allocation.
 
 `BFLARRQRCache` is currently square-only (`n × n`); the allocating `qr!` supports
 rectangular inputs. Do not read the RRQR cache's zero-allocation claims as

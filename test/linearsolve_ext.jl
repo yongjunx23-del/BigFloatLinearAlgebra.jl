@@ -215,4 +215,79 @@ using SciMLBase
                 BigFloat(200; precision = p) * eps(BigFloat)
         end
     end
+
+    @testset "RHS shape lifecycle, factor identity, and failure recovery" begin
+        setprecision(BigFloat, 128) do
+            p = 128
+            n = 3
+            A = BFLA.owned_zeros(BigFloat, n, n; precision_bits = p)
+            for j in 1:n, i in 1:n
+                A[i, j] = BigFloat(i == j ? i + 3 : 1; precision = p)
+            end
+            bv = BFLA.owned_zeros(BigFloat, n; precision_bits = p)
+            for i in 1:n
+                bv[i] = BigFloat(i + 1; precision = p)
+            end
+            cache = LinearSolve.init(LinearSolve.LinearProblem(A, bv), BFLA.BigFloatLU())
+            sol = LinearSolve.solve!(cache)
+            @test SciMLBase.successful_retcode(sol)
+
+            # Matrix refresh preserves factor-matrix and element object identity.
+            cm = cache.cacheval.cache
+            fm_before = BFLA.factor_matrix(cm)
+            ids_before = objectid.(fm_before)
+            A2 = BFLA.owned_copy(A)
+            A2[1, 1] += BigFloat(1; precision = p)
+            SciMLBase.reinit!(cache; A = A2)
+            LinearSolve.solve!(cache)
+            @test BFLA.factor_matrix(cm) === fm_before
+            @test objectid.(fm_before) == ids_before
+
+            # Failure then recovery: singular -> Failure, then good -> Success.
+            As = BFLA.owned_copy(A)
+            for j in 1:n
+                As[2, j] = BigFloat(0; precision = p)
+            end
+            SciMLBase.reinit!(cache; A = As)
+            fsol = LinearSolve.solve!(cache)
+            @test fsol.retcode === SciMLBase.ReturnCode.Failure
+            SciMLBase.reinit!(cache; A = A2)
+            rsol = LinearSolve.solve!(cache)
+            @test SciMLBase.successful_retcode(rsol)
+            @test BFLA.factor_matrix(cm) === fm_before
+        end
+    end
+
+
+    @testset "adapter re-owns a same-array shared re-fill" begin
+        setprecision(BigFloat, 128) do
+            p = 128
+            A = BFLA.owned_zeros(BigFloat, 2, 2; precision_bits = p)
+            A[1, 1] = BigFloat(4; precision = p)
+            A[1, 2] = BigFloat(1; precision = p)
+            A[2, 1] = BigFloat(2; precision = p)
+            A[2, 2] = BigFloat(3; precision = p)
+            b = BFLA.owned_zeros(BigFloat, 2; precision_bits = p)
+            b[1] = BigFloat(9; precision = p)
+            b[2] = BigFloat(11; precision = p)
+            cache = LinearSolve.init(LinearSolve.LinearProblem(A, b), BFLA.BigFloatLU())
+            sol = LinearSolve.solve!(cache)
+            @test SciMLBase.successful_retcode(sol)
+            @test is_independently_owned(sol.u)
+            # Re-fill the SAME solution array with a shared BigFloat object at the
+            # same precision. The adapter must re-own it so the trusted solve does
+            # not silently collapse to a shared-object result.
+            shared = BigFloat(0; precision = p)
+            for i in eachindex(cache.u)
+                cache.u[i] = shared
+            end
+            @test !is_independently_owned(cache.u)
+            sol2 = LinearSolve.solve!(cache)
+            @test SciMLBase.successful_retcode(sol2)
+            @test is_independently_owned(sol2.u)
+            @test BFLA.norminf(Native, A * sol2.u - b) <=
+                BigFloat(200; precision = p) * eps(BigFloat)
+        end
+    end
+
 end

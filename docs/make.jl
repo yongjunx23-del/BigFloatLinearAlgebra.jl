@@ -4,9 +4,11 @@ using BigFloatLinearAlgebra
 makedocs(;
     sitename = "BigFloatLinearAlgebra.jl",
     modules = [BigFloatLinearAlgebra],
+    checkdocs = :exports,
     pages = [
         "Home" => "index.md",
-        "API" => "api.md",
+        "API guide" => "api.md",
+        "Reference" => "reference.md",
         "Precision" => "precision.md",
         "Ownership" => "ownership.md",
         "Backend contract" => "backend_contract.md",

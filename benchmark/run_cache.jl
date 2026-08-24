@@ -1,5 +1,7 @@
 # Phase-5 reusable-cache benchmark: runtime, zero-allocation, and RSS stability
-# for the warm cache hot path (factorize + solve + residual cycles).
+# for the warm cache hot path (factorize! + solve_trusted!). Residual and
+# refinement are NOT measured here; their allocation is reported separately in
+# docs/src/memory_accounting.md and test/caches.jl.
 #
 # Reports Julia-allocated bytes per single call after warm-up, median runtime,
 # and the Sys.maxrss delta across repeated cycles. A stable RSS delta (0) is the
@@ -9,7 +11,7 @@
 #   BFLA_BENCH_PRECISIONS=128,256,512
 #   BFLA_BENCH_SIZES=8,32,128
 #   BFLA_BENCH_NRHS=3
-#   BFLA_BENCH_SAMPLES=8
+#   BFLA_BENCH_SAMPLES=5
 #   BFLA_BENCH_WARMUP=8
 
 include("bench_utils.jl")
