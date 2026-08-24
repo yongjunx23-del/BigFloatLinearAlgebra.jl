@@ -25,4 +25,5 @@ include("test_utils.jl")
     include("repeated_solve.jl")
     include("numerical_robustness.jl")
     include("final_review_regressions.jl")
+    include("linearsolve_ext.jl")
 end

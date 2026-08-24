@@ -28,6 +28,42 @@ include("quality.jl")
 include("generic_backend.jl")
 include("native_backend.jl")
 
+# These factories keep the optional LinearSolve integration discoverable from
+# the parent package without importing either weak dependency in the core.
+function _linearsolve_extension()
+    extension = Base.get_extension(@__MODULE__, :BigFloatLinearSolveExt)
+    extension === nothing && throw(ArgumentError(
+        "BigFloatLU/BigFloatCholesky require LinearSolve and SciMLBase; " *
+        "load both packages before constructing the algorithm",
+    ))
+    return extension
+end
+
+"""
+    BigFloatLU(; backend=DEFAULT_BACKEND)
+
+Construct the optional `LinearSolve.jl` LU algorithm. Load `LinearSolve` and
+`SciMLBase` before calling this factory. The cache aliases `A` and `b`, while
+BFLA's factor owns a deep matrix copy and never modifies either input. A
+right-hand-side-only cache update reuses the factor; after mutating `A` in
+place, use `cache.A = A` or `SciMLBase.reinit!(cache; A = A)` to refactor.
+"""
+function BigFloatLU(args...; kwargs...)
+    return _linearsolve_extension().BigFloatLU(args...; kwargs...)
+end
+
+"""
+    BigFloatCholesky(; backend=DEFAULT_BACKEND, triangle=Lower)
+
+Construct the optional `LinearSolve.jl` Cholesky algorithm. Load `LinearSolve`
+and `SciMLBase` before calling this factory. It has the same input-aliasing,
+owned-factor, factor-reuse, and explicit matrix-refresh contract as
+[`BigFloatLU`](@ref).
+"""
+function BigFloatCholesky(args...; kwargs...)
+    return _linearsolve_extension().BigFloatCholesky(args...; kwargs...)
+end
+
 # A backend that is neither Native nor Generic must fail with an identifiable
 # error rather than falling through to a different backend's kernel.
 for name in (
@@ -156,6 +192,8 @@ export AbstractBFLABackend,
     try_lu!,
     lu!,
     lu,
+    BigFloatLU,
+    BigFloatCholesky,
     residual!,
     normwise_backward_error,
     higher_precision_residual!,

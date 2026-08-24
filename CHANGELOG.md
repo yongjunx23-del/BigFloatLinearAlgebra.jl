@@ -3,6 +3,25 @@
 All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.1.1] - 2026-08-25
+
+### Added
+
+- Julia package extension integration with LinearSolve.jl and SciMLBase.jl.
+- `BigFloatLU()` and `BigFloatCholesky()` LinearSolve algorithms backed by
+  BFLA-owned factors and explicit Native/Generic backend selection.
+- Focused extension tests covering arbitrary precision, vector and matrix
+  right-hand sides, cache reuse, refactorization, ownership, and failure paths.
+
+### Changed
+
+- LinearSolve caches reuse fresh factorizations for repeated solves and repair
+  right-hand-side storage when precision or mutable BigFloat ownership changes.
+- CI tests current LinearSolve releases and the supported lower compatibility
+  bounds without making LinearSolve a required runtime dependency.
+- TagBot now receives the repository permissions required to publish tags and
+  releases after General Registry registration.
+
 ## [0.1.0] - 2026-08-17
 
 ### Added

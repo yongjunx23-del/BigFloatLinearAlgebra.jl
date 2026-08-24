@@ -11,15 +11,6 @@ selection is explicit and operations never silently fall back.
 
 ## Installation
 
-Before registration in Julia General is complete:
-
-```julia
-using Pkg
-Pkg.add(url = "https://github.com/yongjunx23-del/BigFloatLinearAlgebra.jl")
-```
-
-After registration:
-
 ```julia
 using Pkg
 Pkg.add("BigFloatLinearAlgebra")
@@ -51,6 +42,7 @@ x = solve(F, b)
 - Level 1-3 and symmetric BLAS-like kernels;
 - Cholesky, symmetric-indefinite LDLT, column-pivoted QR, and LU;
 - vector and multi-RHS factor solves;
+- optional LinearSolve.jl LU and Cholesky algorithms with factor reuse;
 - factor metadata, residuals, backward error, and refinement helpers;
 - caller-owned, worker-local workspace for repeated solves;
 - Native and Generic backends with no hidden fallback.
