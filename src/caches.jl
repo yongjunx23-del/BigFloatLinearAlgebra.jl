@@ -491,21 +491,39 @@ function factorize!(
         cache.status = FactorStatus(:nonfinite, nothing)
         return cache
     end
-    info, pivots = _cache_lu!(cache)
+    info = _cache_lu!(cache)
     if !_all_finite(factors)
         cache.status = FactorStatus(:nonfinite, nothing)
         return cache
     end
+    _lu_rebuild_perm!(cache.perm, cache.pivots)
     cache.status = info == 0 ? SUCCESS_STATUS : FactorStatus(:singular, info)
     return cache
 end
 
-# Refactorable LU kernel: writes pivots into the cache's preallocated array.
-function _cache_lu!(cache::BFLALUCache)
+# Rebuild the final row permutation `perm` in place from the step pivots, so
+# `factor_perm(cache)` and `factor_diagnostics(cache).permutation` report the
+# permutation `A[perm, :] = L*U` consistent with the allocating LU factor.
+function _lu_rebuild_perm!(perm::Vector{Int}, pivots::Vector{Int})
+    n = length(pivots)
+    @inbounds for i in 1:n
+        perm[i] = i
+    end
+    @inbounds for k in 1:n
+        pivot = pivots[k]
+        perm[k], perm[pivot] = perm[pivot], perm[k]
+    end
+    return perm
+end
+
+# Native LU kernel: writes pivots into the cache's preallocated array and
+# factorizes the cache's owned matrix in place, using cache-owned scalars
+# (zero Julia allocation). Dispatched on the backend type so a Native cache can
+# never execute a Generic kernel and vice versa.
+function _cache_lu!(cache::BFLALUCache{<:Any,NativeBackend})
     n = cache.n
     factors = cache.factors
     pivots = cache.pivots
-    p = cache.precision_bits
     scalars = cache.scalars
     @inbounds for i in 1:n
         pivots[i] = i
@@ -524,7 +542,7 @@ function _cache_lu!(cache::BFLALUCache)
             end
         end
         pivots[k] = pivot
-        iszero(maximum_value) && return k, pivots
+        iszero(maximum_value) && return k
         if pivot != k
             for j in 1:n
                 factors[k, j], factors[pivot, j] = factors[pivot, j], factors[k, j]
@@ -538,7 +556,22 @@ function _cache_lu!(cache::BFLALUCache)
             end
         end
     end
-    return 0, pivots
+    return 0
+end
+
+# Generic reference LU kernel. It delegates to the reference `_lu!` path, which
+# may allocate its pivot metadata and scratch; this is the documented, honest
+# behaviour of the Generic backend (it is a reference, not a zero-allocation
+# target). It still writes pivots into the cache's owned array and reuses the
+# cache's factor matrix.
+function _cache_lu!(cache::BFLALUCache{<:Any,GenericBackend})
+    n = cache.n
+    p = cache.precision_bits
+    info, pivots = _lu!(GenericBackend(), cache.factors, p)
+    @inbounds for i in 1:n
+        cache.pivots[i] = i <= length(pivots) ? pivots[i] : i
+    end
+    return info
 end
 
 function solve!(
