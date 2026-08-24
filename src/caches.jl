@@ -288,8 +288,8 @@ function factorize!(
         cache.status = FactorStatus(:nonfinite, nothing)
         return cache
     end
-    info = _cholesky_dispatch!(
-        cache.backend, factors, triangle, cache.precision_bits, KernelConfig(),
+    info = _cache_cholesky_dispatch!(
+        cache.backend, factors, triangle, cache.precision_bits, cache.scalars,
     )
     if !_triangle_finite(factors, triangle)
         cache.status = FactorStatus(:nonfinite, nothing)
@@ -298,6 +298,70 @@ function factorize!(
     cache.status = info == 0 ? SUCCESS_STATUS :
         FactorStatus(:not_positive_definite, info)
     return cache
+end
+
+# Dispatch Cholesky into cache-owned scalar scratch. The Native path is
+# zero-allocation; Generic is the reference backend and may allocate.
+@inline function _cache_cholesky_dispatch!(
+    backend::NativeBackend,
+    A::AbstractMatrix{BigFloat},
+    triangle::Triangle,
+    p::Int,
+    scalars::Union{Nothing,CacheScalars},
+)
+    triangle === Lower ||
+        _unsupported(NativeBackend(), :cholesky, "NativeBackend supports triangle=Lower only in phase 1")
+    return _cache_cholesky_native!(A, p, scalars)
+end
+@inline function _cache_cholesky_dispatch!(
+    backend::GenericBackend,
+    A::AbstractMatrix{BigFloat},
+    triangle::Triangle,
+    p::Int,
+    ::Union{Nothing,CacheScalars},
+)
+    return _cholesky_dispatch!(backend, A, triangle, p, KernelConfig())
+end
+
+# Zero-allocation Native Cholesky into the cache's owned matrix and scalar
+# scratch. Mirror of `_cholesky!` using caller-owned scalars.
+function _cache_cholesky_native!(A::AbstractMatrix{BigFloat}, p::Int, s::CacheScalars)
+    acc = s.acc
+    buffer = s.buffer
+    difference = s.difference
+    k = size(A, 1)
+    k == 0 && return 0
+    @inbounds for j in 1:k
+        if j > 1
+            MA.operate!(zero, acc)
+            for index in 1:(j - 1)
+                MA.buffered_operate!(buffer, MA.add_mul, acc, A[j, index], A[j, index])
+            end
+            MA.operate_to!(difference, -, A[j, j], acc)
+            djj = difference
+        else
+            djj = A[j, j]
+        end
+        djj <= 0 && return j
+        _mpfr_sqrt!(A[j, j], djj)
+        Ljj = A[j, j]
+        for i in (j + 1):k
+            if j > 1
+                MA.operate!(zero, acc)
+                for index in 1:(j - 1)
+                    MA.buffered_operate!(
+                        buffer, MA.add_mul, acc, A[i, index], A[j, index],
+                    )
+                end
+                MA.operate_to!(difference, -, A[i, j], acc)
+                numerator = difference
+            else
+                numerator = A[i, j]
+            end
+            _mpfr_div!(A[i, j], numerator, Ljj)
+        end
+    end
+    return 0
 end
 
 """

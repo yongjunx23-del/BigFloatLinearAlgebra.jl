@@ -1198,25 +1198,27 @@ function _cholesky_solve!(
         _unsupported(NativeBackend(), :factor_solve, "NativeBackend supports triangle=Lower only in phase 1")
     n = size(L, 1)
     n == 0 && return rhs
+    nrhs = length(rhs) ÷ n
     acc = _solve_scratch(workspace, workspace_worker, 1, p)
     buffer = _solve_scratch(workspace, workspace_worker, 2, p)
     difference = _solve_scratch(workspace, workspace_worker, 3, p)
-    @inbounds for column in axes(rhs, 2)
+    @inbounds for column in 1:nrhs
+        base = (column - 1) * n
         for row in 1:n
             MA.operate!(zero, acc)
             for k in 1:(row - 1)
-                MA.buffered_operate!(buffer, MA.add_mul, acc, L[row, k], rhs[k, column])
+                MA.buffered_operate!(buffer, MA.add_mul, acc, L[row, k], rhs[base + k])
             end
-            MA.operate_to!(difference, -, rhs[row, column], acc)
-            _mpfr_div!(rhs[row, column], difference, L[row, row])
+            MA.operate_to!(difference, -, rhs[base + row], acc)
+            _mpfr_div!(rhs[base + row], difference, L[row, row])
         end
         for row in n:-1:1
             MA.operate!(zero, acc)
             for k in (row + 1):n
-                MA.buffered_operate!(buffer, MA.add_mul, acc, L[k, row], rhs[k, column])
+                MA.buffered_operate!(buffer, MA.add_mul, acc, L[k, row], rhs[base + k])
             end
-            MA.operate_to!(difference, -, rhs[row, column], acc)
-            _mpfr_div!(rhs[row, column], difference, L[row, row])
+            MA.operate_to!(difference, -, rhs[base + row], acc)
+            _mpfr_div!(rhs[base + row], difference, L[row, row])
         end
     end
     return rhs
