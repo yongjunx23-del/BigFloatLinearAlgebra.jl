@@ -50,7 +50,8 @@ if factor_status(cache).kind !== :success
     # the solver decides what to do with the failure
     return solver_handling(factor_status(cache))
 end
-solve!(x, cache, b)
+# x is owned by the solver (owned_zeros) -> the trusted, zero-allocation solve
+solve_trusted!(x, cache, b)
 eta = normwise_backward_error(NativeBackend(), A, x, b,
                               owned_zeros(BigFloat, size(b)...; precision_bits = precision_bits))
 # eta is a fact; whether it is "good enough" is the solver's call.

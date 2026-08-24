@@ -32,9 +32,16 @@ Single-call allocations after warm-up, `n = 32`, `precision = 256`:
 | `solve!` (RRQR)        | 0           |
 
 LDL and RRQR factorization currently reuse the allocating reference kernels for
-their pivot/metadata output (`perm`, `blocks`, `tau`, `jpvt`). Their *solve*
-paths and the Cholesky/LU factorization/solve paths are zero-allocation. This is
-a documented, reproducible limitation rather than a hidden allocation.
+their pivot/metadata output (`perm`, `blocks`, `tau`, `jpvt`). Their trusted
+`solve_trusted!` paths and the Cholesky/LU factorization/solve paths are
+zero-allocation. This is a documented, reproducible limitation rather than a
+hidden allocation. The checked `solve!(x, cache, b)` intentionally re-owns the
+destination and therefore allocates by design; use `solve_trusted!` on the hot
+path with an already-owned destination.
+
+`BFLARRQRCache` is currently square-only (`n × n`); the allocating `qr!` supports
+rectangular inputs. Do not read the RRQR cache's zero-allocation claims as
+applying to rectangular systems.
 
 ## MPFR allocator behavior
 

@@ -26,8 +26,10 @@ mismatch throws [`PrecisionMismatch`](@ref) before any storage is written.
 ```julia
 cache = BFLACholeskyCache(NativeBackend())   # un-prepared
 prepare!(cache, n, precision_bits; nrhs = 1) # reserve storage (allocating)
+prepare_refinement!(cache, nrhs)              # optionally size refinement scratch
 factorize!(cache, A)                          # factor A into cache.factors
-solve!(x, cache, b)                           # write solution into existing x
+solve!(x, cache, b)                           # checked: re-owns x, safe for any dest
+solve_trusted!(x, cache, b)                   # trusted: zero-alloc, x must be owned
 refine_once!(cache, A, x, b)                  # exactly one refinement step
 factor_status(cache)                          # success / failure + position
 factor_precision(cache)                       # the reserved precision
@@ -39,20 +41,33 @@ worker/threading policy, and its synchronization. The ordinary allocating
 factor API (`cholesky`, `lu`, `ldlt`, `qr`) is untouched and remains
 independent.
 
+## Checked vs trusted solve
+
+* `solve!(x, cache, b)` is the **checked** API. It validates status, dimensions,
+  RHS precision, and aliasing, and *re-owns* the destination (replacing each
+  element with an independently-owned copy at the factor precision). This makes
+  it safe for any destination, including a shared `fill!` array or one carrying
+  a stale ambient precision, at the cost of allocating the copies.
+* `solve_trusted!(x, cache, b)` is the **solver-facing hot API**. It requires
+  `x` to already be independently owned at the factor precision (for example
+  from `owned_zeros`), copies `b` into the existing `x` objects and solves in
+  place, allocating no new `BigFloat` objects. SDPX should call this on the hot
+  path and guarantee `x`'s ownership.
+
 ## Invariants
 
 1. **Precision or size change is explicit.** Changing `n` or the precision is a
    new `prepare!`; it never happens inside a hot loop.
-2. **No element replacement on the hot path.** `factorize!`, `solve!`, residual,
-   and refinement write into the cache's existing `BigFloat` objects. The one
-   exception is the warm-up ownership repair described below.
+2. **No element replacement on the trusted hot path.** `factorize!`,
+   `solve_trusted!`, residual, and refinement write into the cache's existing
+   `BigFloat` objects. (The checked `solve!` intentionally re-owns.)
 3. **No metadata rebuild on repeated factorization.** Repeating `factorize!`
    writes `pivots`/`perm`/`tau`/`jpvt` into preallocated arrays; it does not
    create factor wrappers or identity vectors.
 4. **Zero Julia allocation after warm-up.** For the Native backend,
-   `factorize!` + `solve!` + residual for Cholesky and LU, and every cached
-   `solve!`, allocate 0 Julia bytes once the destination storage carries the
-   cache precision and is independently owned.
+   `factorize!` + `solve_trusted!` + residual for Cholesky and LU, and every
+   cached trusted solve, allocate 0 Julia bytes once the destination storage
+   carries the cache precision and is independently owned.
 5. **No implicit `Float64` conversion and no silent fallback.** The Native
    backend never converts to `Float64` and never delegates to the Generic
    backend.
