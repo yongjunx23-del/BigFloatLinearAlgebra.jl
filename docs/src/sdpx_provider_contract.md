@@ -32,7 +32,7 @@ should accept it, fall back, or iterate.
    MPFR storage; no shared `zeros`/`fill` objects leak into kernels.
 3. **No silent fallback.** `NativeBackend` never converts to `Float64` and never
    delegates to `GenericBackend`; an unsupported operation is a hard
-   [`UnsupportedOperation`](@ref).
+   `UnsupportedOperation`.
 4. **Solver-independence.** BFLA reports residuals and normwise backward errors
    but does not accept/reject them, set a tolerance, choose refinement steps, or
    switch backend.

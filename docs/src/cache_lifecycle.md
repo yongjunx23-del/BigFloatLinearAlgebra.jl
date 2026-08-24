@@ -19,7 +19,7 @@ Every mutable `BigFloat` destination a cache uses is owned by the cache:
 
 Precision is never read from ambient state. The cache precision is set by
 `prepare!` and every operand must match it exactly; a cross-operand precision
-mismatch throws [`PrecisionMismatch`](@ref) before any storage is written.
+mismatch throws `PrecisionMismatch` before any storage is written.
 
 ## Lifecycle
 
