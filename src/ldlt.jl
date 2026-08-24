@@ -143,7 +143,9 @@ function factor_inertia(F::BFLALDLTFactor)
     return _factor_inertia_unchecked(F)
 end
 
-function _factor_inertia_unchecked(F::BFLALDLTFactor)
+# Duck-typed over any factor-like object exposing `factors`, `blocks`, and
+# `precision_bits` (the allocating factor and the reusable cache both do).
+function _factor_inertia_unchecked(F)
     npos = 0
     nneg = 0
     nzero = 0
@@ -709,7 +711,7 @@ end
 
 _ldlt_solve!(
     ::NativeBackend,
-    F::BFLALDLTFactor,
+    F,
     rhs::AbstractVecOrMat{BigFloat},
     workspace::Union{Nothing,BFLAWorkspace},
     workspace_worker::Int,
@@ -717,14 +719,14 @@ _ldlt_solve!(
 
 _ldlt_solve!(
     ::GenericBackend,
-    F::BFLALDLTFactor,
+    F,
     rhs::AbstractVecOrMat{BigFloat},
     workspace::Union{Nothing,BFLAWorkspace},
     workspace_worker::Int,
 ) = _ldlt_solve_common!(F, rhs, workspace, workspace_worker)
 
 function _ldlt_solve_common!(
-    F::BFLALDLTFactor,
+    F,
     rhs::AbstractVecOrMat{BigFloat},
     workspace::Union{Nothing,BFLAWorkspace},
     workspace_worker::Int,
