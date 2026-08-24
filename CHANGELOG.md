@@ -40,6 +40,24 @@ All notable changes to this project are documented here. The format is based on
   `residual_precision` keyword (cache refinement is factor-precision-only).
 - Version is planned as **0.2.0** (new public API).
 
+### Changed (follow-up)
+
+- Added `refine_once_trusted!` (solver-facing) alongside the checked
+  `refine_once!`; both reject solution aliasing against the factor and the RHS,
+  and the checked path re-owns a shared/ambient-precision destination safely.
+- `prepare_refinement!(cache, rhs_template)` preserves the exact RHS shape
+  (Vector vs `n×1` vs `n×k` Matrix); `refine_once!` throws on a prepared-scratch
+  shape mismatch instead of silently resizing.
+- All four caches' trusted `solve_trusted!` are now zero-Julia-allocation after
+  warm-up (LDLT and RRQR included); a bounded gate records that `refine_once!`
+  is allocation-light, not zero.
+- Metadata accessors (`factor_pivots`, `factor_perm`, `factor_blocks`,
+  `factor_inertia`, `factor_rank`, `factor_jpvt`, `factor_Rdiag`,
+  `factor_rank_atol/rtol/scale/threshold`, `factor_diagnostics`) throw after
+  `invalidate!`/failed factorization instead of returning stale metadata.
+- LinearSolve adapter re-owns `cache.u` on a same-array shared re-fill and
+  rethrows interrupts/out-of-memory (only precision errors are handled).
+
 ### Known limitations
 
 - `BFLARRQRCache` is currently square-only (`n × n`); rectangular/overdetermined
