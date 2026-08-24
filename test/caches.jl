@@ -234,6 +234,7 @@ end
     b = _rhs(A, x0, p)
     c = BFLACholeskyCache(NativeBackend())
     prepare!(c, n, p)
+    prepare_refinement!(c, b)   # vector-RHS scratch shape
     factorize!(c, A)
     x = owned_zeros(BigFloat, n; precision_bits = p)
     solve!(x, c, b)
@@ -405,6 +406,7 @@ end
     end
     c = BFLACholeskyCache(NativeBackend())
     prepare!(c, n, p; nrhs = 1)
+    prepare_refinement!(c, b)   # vector-RHS scratch shape
     @test c.refine !== nothing   # prepare_refinement! ran eagerly
     factorize!(c, A)
     x = owned_zeros(BigFloat, n; precision_bits = p)
@@ -515,4 +517,49 @@ end
     storage_before = c.refine
     refine_once!(c, A, x, b)
     @test c.refine === storage_before
+end
+
+@testset "refine_once! and refine_once_trusted! reject alias and repair ownership" begin
+    p = 256
+    n = 8
+    rng = MersenneTwister(4242)
+    A = _spd_fixture(n, p, rng)
+    b = owned_zeros(BigFloat, n; precision_bits = p)
+    for i in 1:n
+        b[i] = BigFloat(rand(rng, -1024:1024); precision = p)
+    end
+    c = BFLACholeskyCache(NativeBackend())
+    prepare!(c, n, p; nrhs = 1)
+    prepare_refinement!(c, b)
+    factorize!(c, A)
+    x = owned_zeros(BigFloat, n; precision_bits = p)
+    solve_trusted!(x, c, b)
+
+    # x aliases the factor matrix column -> both checked and trusted reject.
+    x_alias = view(factor_matrix(c), :, 1)
+    @test_throws ArgumentError refine_once!(c, A, x_alias, b)
+    @test_throws ArgumentError refine_once_trusted!(c, A, x_alias, b)
+    # x aliases the RHS -> both reject.
+    @test_throws ArgumentError refine_once!(c, A, b, b)
+    @test_throws ArgumentError refine_once_trusted!(c, A, b, b)
+    # a shared-element x is safely repaired by the checked path and rejected by
+    # the trusted path (which requires independent ownership).
+    x_shared = fill!(Array{BigFloat}(undef, n), BigFloat(0; precision = p))
+    report = refine_once!(c, A, x_shared, b)   # repaired safely
+    @test is_independently_owned(x_shared)
+    @test isfinite(report.backward_error_after)
+    # trusted path on an owned, correct-precision x works.
+    x2 = owned_zeros(BigFloat, n; precision_bits = p)
+    solve_trusted!(x2, c, b)
+    r2 = refine_once_trusted!(c, A, x2, b)
+    @test isfinite(r2.backward_error_after)
+    # scratch shape mismatch throws (no silent re-resize): prepare for a matrix,
+    # then refine with the vector RHS.
+    cm = BFLACholeskyCache(NativeBackend())
+    prepare!(cm, n, p; nrhs = 2)
+    prepare_refinement!(cm, owned_zeros(BigFloat, n, 2; precision_bits = p))
+    factorize!(cm, A)
+    xm = owned_zeros(BigFloat, n; precision_bits = p)
+    solve_trusted!(xm, cm, b)
+    @test_throws DimensionMismatch refine_once!(cm, A, xm, b)  # vector vs n×2 scratch
 end

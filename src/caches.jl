@@ -581,7 +581,10 @@ end
 
 factor_kind(::BFLALUCache) = :lu
 factor_matrix(cache::BFLALUCache) = cache.factors
-factor_pivots(cache::BFLALUCache) = copy(cache.pivots)
+function factor_pivots(cache::BFLALUCache)
+    _cache_require_success(cache, "factor_pivots")
+    return copy(cache.pivots)
+end
 function factor_perm(cache::BFLALUCache)
     _cache_require_success(cache, "factor_perm")
     return copy(cache.perm)
@@ -993,10 +996,22 @@ function factor_Rdiag(cache::BFLARRQRCache)
     return Rdiag
 end
 
-factor_rank_atol(cache::BFLARRQRCache) = MA.mutable_copy(cache.atol)
-factor_rank_rtol(cache::BFLARRQRCache) = MA.mutable_copy(cache.rtol)
-factor_rank_scale(cache::BFLARRQRCache) = MA.mutable_copy(cache.reference_scale)
-factor_rank_threshold(cache::BFLARRQRCache) = MA.mutable_copy(cache.effective_threshold)
+function factor_rank_atol(cache::BFLARRQRCache)
+    _cache_require_success(cache, "factor_rank_atol")
+    return MA.mutable_copy(cache.atol)
+end
+function factor_rank_rtol(cache::BFLARRQRCache)
+    _cache_require_success(cache, "factor_rank_rtol")
+    return MA.mutable_copy(cache.rtol)
+end
+function factor_rank_scale(cache::BFLARRQRCache)
+    _cache_require_success(cache, "factor_rank_scale")
+    return MA.mutable_copy(cache.reference_scale)
+end
+function factor_rank_threshold(cache::BFLARRQRCache)
+    _cache_require_success(cache, "factor_rank_threshold")
+    return MA.mutable_copy(cache.effective_threshold)
+end
 
 function prepare!(
     cache::BFLARRQRCache,
@@ -1117,6 +1132,7 @@ end
 # --- factor_diagnostics ---------------------------------------------------
 
 function factor_diagnostics(cache::BFLACholeskyCache)
+    _cache_require_success(cache, "factor_diagnostics")
     return (
         factor_kind = factor_kind(cache),
         triangle = factor_triangle(cache),
@@ -1161,17 +1177,15 @@ end
 """
     refine_once!(cache, A, x, b) -> NamedTuple
 
-Perform exactly one iterative-refinement correction on the cache's factor:
-`residual = b - A*x`, solve the factor system for a correction, and update
-`x += correction`. The cache owns the residual and correction scratch
-(allocated by `prepare!` / `prepare_refinement!`), so once that storage is ready
-the step writes into existing destinations. This is a single step; BFLA does not
-iterate, choose a tolerance, raise precision, or switch backend.
+**Checked** single iterative-refinement correction: `residual = b - A*x`, solve
+the factor system for a correction, and update `x += correction`. This validates
+that `x` does not alias `cache.factors` or `b`, that the shapes agree, and that
+the RHS precision matches the cache; it also *re-owns* `x` (repairing shared
+`BigFloat` elements and any stale ambient precision) so an arbitrary destination
+is refined safely. It allocates by design.
 
-Cache refinement is *factor-precision-only*: the residual, correction, and
-backward error all use the cache's explicit precision. There is intentionally no
-`residual_precision` keyword here; higher-precision residual refinement belongs
-to the allocating-factor API and is not part of the cache contract.
+Cache refinement is *factor-precision-only*; this is a single step (BFLA does not
+iterate, choose a tolerance, raise precision, or switch backend).
 """
 function refine_once!(
     cache::Union{BFLACholeskyCache,BFLALUCache,BFLALDLTCache,BFLARRQRCache},
@@ -1181,35 +1195,89 @@ function refine_once!(
 )
     _cache_require_success(cache, "refine_once!")
     _require_cache_matrix(cache, A, "refine_once!")
-    p = cache.precision_bits
+    _require_cache_rhs(cache, b, "refine_once!")
     size(x) == size(b) || throw(DimensionMismatch(
         "refine_once!: solution and right-hand side dimensions differ",
     ))
-    n = cache.n
-    size(x, 1) == n || throw(DimensionMismatch(
-        "refine_once!: cache and solution rows differ",
+    _require_no_alias(x, cache.factors, "refine_once!")
+    Base.mightalias(x, b) && throw(ArgumentError(
+        "refine_once!: solution must not alias the right-hand side",
     ))
+    p = cache.precision_bits
+    _cache_repair_owned!(x, p, "refine_once!")
     residual = _cache_refine_storage(cache, size(b))
     return _refine_once_cached(cache, A, x, b, residual, p)
+end
+
+"""
+    refine_once_trusted!(cache, A, x, b) -> NamedTuple
+
+Trusted single iterative refinement. Identical to [`refine_once!`](@ref) except
+that it requires `x` to already be independently owned at the factor precision
+(e.g. from `owned_zeros`); it skips the ownership/precision repair but still
+rejects aliasing against `cache.factors` and `b`, and requires matching shapes.
+"""
+function refine_once_trusted!(
+    cache::Union{BFLACholeskyCache,BFLALUCache,BFLALDLTCache,BFLARRQRCache},
+    A::AbstractMatrix{BigFloat},
+    x::AbstractVecOrMat{BigFloat},
+    b::AbstractVecOrMat{BigFloat},
+)
+    _cache_require_success(cache, "refine_once_trusted!")
+    _require_cache_matrix(cache, A, "refine_once_trusted!")
+    _require_cache_rhs(cache, b, "refine_once_trusted!")
+    size(x) == size(b) || throw(DimensionMismatch(
+        "refine_once_trusted!: solution and right-hand side dimensions differ",
+    ))
+    _require_no_alias(x, cache.factors, "refine_once_trusted!")
+    Base.mightalias(x, b) && throw(ArgumentError(
+        "refine_once_trusted!: solution must not alias the right-hand side",
+    ))
+    p = cache.precision_bits
+    xp = _require_precision(_check_precision(x), "refine_once_trusted!")
+    xp == p || throw(PrecisionMismatch(p, xp, nothing))
+    residual = _cache_refine_storage(cache, size(b))
+    return _refine_once_cached(cache, A, x, b, residual, p)
+end
+
+# Re-own `x` at the cache precision, preserving each element's value rounded to
+# that precision. Repairs shared elements and stale ambient precision so the
+# checked refine path never writes into shared BigFloat objects.
+function _cache_repair_owned!(x::AbstractArray{BigFloat}, p::Int, op::AbstractString)
+    # `BigFloat(y; precision=p)` returns `y` itself when the precision already
+    # matches (a pass-through, no copy), so we round to p and force a fresh
+    # independently-owned object with `MA.mutable_copy`.
+    @inbounds for index in eachindex(x)
+        x[index] = MA.mutable_copy(BigFloat(x[index]; precision = p))
+    end
+    return x
 end
 
 # Owned refinement scratch. Allocated by prepare! so the refinement step itself
 # writes into existing destinations.
 
 
-# Internal: per-cache refine storage helper. Kept simple and allocation-free on
-# the hot refinement path after the first prepare.
+# Internal: per-cache refine storage helper. It returns the cache's prepared
+# refinement scratch only when it already matches the requested RHS shape and the
+# cache precision. It never silently re-sizes; a Vector vs n×1 Matrix vs n×k
+# Matrix mismatch (or a precision change) throws and requires an explicit
+# `prepare_refinement!(cache, rhs_template)` / `prepare!`.
 function _cache_refine_storage(cache::AbstractFactorCache, size_of_b)
     storage = cache.refine
-    if storage === nothing || size(storage.residual) != size_of_b ||
-            storage.precision_bits != cache.precision_bits
-        storage = CacheRefineStorage(
-            owned_zeros(BigFloat, size_of_b...; precision_bits = cache.precision_bits),
-            owned_zeros(BigFloat, size_of_b...; precision_bits = cache.precision_bits),
-            cache.precision_bits,
-        )
-        cache.refine = storage
+    if storage === nothing
+        throw(ArgumentError(
+            "refine_once!: no refinement scratch prepared; call " *
+            "prepare_refinement!(cache, rhs_template) first",
+        ))
     end
+    storage.precision_bits == cache.precision_bits || throw(PrecisionMismatch(
+        cache.precision_bits, storage.precision_bits, nothing,
+    ))
+    size(storage.residual) == size_of_b || throw(DimensionMismatch(
+        "refine_once!: prepared refinement scratch has size " *
+        "$(size(storage.residual)) but the RHS has size $size_of_b; call " *
+        "prepare_refinement!(cache, rhs_template) to re-reserve the RHS shape",
+    ))
     return storage
 end
 
