@@ -5,7 +5,6 @@ makedocs(;
     sitename = "BigFloatLinearAlgebra.jl",
     modules = [BigFloatLinearAlgebra],
     checkdocs = :exports,
-    strict = true,
     pages = [
         "Home" => "index.md",
         "API guide" => "api.md",
