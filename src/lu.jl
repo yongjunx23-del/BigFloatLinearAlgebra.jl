@@ -48,6 +48,7 @@ Report row-swap count, final permutation, and optional failure position.
 These are numerical facts only; no fallback policy is implied.
 """
 function factor_diagnostics(F::BFLALUFactor)
+    _validate_factor_metadata(F, "factor_diagnostics")
     return (
         factor_kind = factor_kind(F),
         row_swap_count = count(k -> F.pivots[k] != k, eachindex(F.pivots)),

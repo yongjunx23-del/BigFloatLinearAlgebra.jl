@@ -890,6 +890,7 @@ valid after a successful `factorize!`.
 """
 function factor_inertia(cache::BFLALDLTCache)
     _cache_require_success(cache, "factor_inertia")
+    _validate_factor_metadata(cache, "factor_inertia")
     return _factor_inertia_unchecked(cache)
 end
 
@@ -1235,6 +1236,7 @@ end
 
 function factor_diagnostics(cache::BFLALUCache)
     _cache_require_success(cache, "factor_diagnostics")
+    _validate_factor_metadata(cache, "factor_diagnostics")
     return (
         factor_kind = factor_kind(cache),
         row_swap_count = count(k -> cache.pivots[k] != k, eachindex(cache.pivots)),
@@ -1245,6 +1247,7 @@ end
 
 function factor_diagnostics(cache::BFLALDLTCache)
     _cache_require_success(cache, "factor_diagnostics")
+    _validate_factor_metadata(cache, "factor_diagnostics")
     inertia = _factor_inertia_unchecked(cache)
     return (
         factor_kind = factor_kind(cache),
@@ -1257,6 +1260,7 @@ end
 
 function factor_diagnostics(cache::BFLARRQRCache)
     _cache_require_success(cache, "factor_diagnostics")
+    _validate_factor_metadata(cache, "factor_diagnostics")
     return (
         factor_kind = factor_kind(cache),
         rank = cache.rank,

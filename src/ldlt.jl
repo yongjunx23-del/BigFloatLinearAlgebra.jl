@@ -284,6 +284,7 @@ should do with them.
 function factor_diagnostics(F::BFLALDLTFactor)
     if issuccess(F)
         _validate_factor_precision(F, "factor_diagnostics")
+        _validate_factor_metadata(F, "factor_diagnostics")
         _triangle_finite(F.factors, Lower) || throw(DomainError(
             F.factors,
             "factor_diagnostics: authoritative LDLT triangle contains " *
