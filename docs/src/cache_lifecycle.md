@@ -1,9 +1,12 @@
 # Reusable Factor Caches
 
 The reusable, precision-specific factor caches decouple *reservation* of
-numeric storage from its *use*. `prepare!` is the only allocating entry point;
-after warm-up the `factorize!` / `solve!` / refinement hot paths write into the
-cache's own `BigFloat` destinations without creating new Julia objects.
+numeric storage from its *use*. `prepare!` and `prepare_refinement!` are the
+allocation entry points; after warm-up the trusted hot path (`factorize!` for
+Native Cholesky/LU and `solve_trusted!` for all four caches) writes into the
+cache's own `BigFloat` destinations without creating new Julia objects. The
+checked `solve!` re-owns its destination (allocating by design), and refinement
+is allocation-light rather than zero-allocation.
 
 ## Ownership model
 
