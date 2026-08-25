@@ -671,7 +671,9 @@ end
     Fm[1, 1] = BigFloat(NaN; precision = p)
     @test_throws DomainError solve!(x, c, b)
     @test_throws DomainError refine_once!(c, A, x, b)
-    solve_trusted!(x, c, b)  # trusted does not rescan factor storage
+    # trusted does not rescan factor storage, but it still rejects the non-finite
+    # result that the NaN factor produces.
+    @test_throws DomainError solve_trusted!(x, c, b)
 
     # a precision-mutated factor matrix is rejected by checked
     c2 = BFLALUCache(NativeBackend())
@@ -706,4 +708,94 @@ end
     factorize!(cq2, A)
     cq2.jpvt[1] = -1
     @test_throws ArgumentError solve!(x, cq2, b)
+end
+
+@testset "refactor exception atomicity" begin
+    p = 256
+    n = 8
+    rng = MersenneTwister(606)
+    A = _square_fixture(n, p, rng)
+    b = owned_zeros(BigFloat, n; precision_bits = p)
+    for i in 1:n
+        b[i] = BigFloat(i; precision = p)
+    end
+    x = owned_zeros(BigFloat, n; precision_bits = p)
+
+    # RRQR: a negative tolerance is a preflight error that must NOT invalidate
+    # the previous successful factor.
+    cq = BFLARRQRCache(NativeBackend())
+    prepare!(cq, n, p)
+    factorize!(cq, A)
+    @test issuccess(cq)
+    @test_throws DomainError factorize!(cq, A; atol = BigFloat(-1; precision = p))
+    @test issuccess(cq)   # old factor preserved (preflight error)
+
+    # A nonfinite input is a commit-phase failure: status becomes non-success.
+    Anan = owned_copy(A)
+    Anan[1, 1] = BigFloat(NaN; precision = p)
+    factorize!(cq, Anan)
+    @test !issuccess(cq)
+    @test factor_status(cq).kind == :nonfinite
+    @test_throws ArgumentError solve_trusted!(x, cq, b)  # not success -> rejected
+
+    # Recovery: a good factorization restores success.
+    factorize!(cq, A)
+    @test issuccess(cq)
+    solve_trusted!(x, cq, b)
+    @test isfinite(_backward_error(A, x, b, p))
+
+    # LU: a singular input leaves a non-success status, then recovery works.
+    c = BFLALUCache(NativeBackend())
+    prepare!(c, n, p)
+    factorize!(c, A)
+    @test issuccess(c)
+    As = owned_copy(A)
+    for j in 1:n
+        As[2, j] = BigFloat(0; precision = p)
+    end
+    factorize!(c, As)
+    @test !issuccess(c)
+    @test factor_status(c).kind == :singular
+    @test_throws ArgumentError solve_trusted!(x, c, b)
+    factorize!(c, A)
+    @test issuccess(c)
+    solve_trusted!(x, c, b)
+    @test isfinite(_backward_error(A, x, b, p))
+end
+
+@testset "cache solve finite semantics" begin
+    p = 256
+    n = 8
+    rng = MersenneTwister(313)
+    A = _square_fixture(n, p, rng)
+    b = owned_zeros(BigFloat, n; precision_bits = p)
+    for i in 1:n
+        b[i] = BigFloat(i; precision = p)
+    end
+    x = owned_zeros(BigFloat, n; precision_bits = p)
+    c = BFLALUCache(NativeBackend())
+    prepare!(c, n, p)
+    factorize!(c, A)
+
+    # NaN RHS is rejected by both checked and trusted.
+    bnan = owned_copy(b)
+    bnan[1] = BigFloat(NaN; precision = p)
+    @test_throws DomainError solve!(x, c, bnan)
+    @test_throws DomainError solve_trusted!(x, c, bnan)
+    # Inf RHS is rejected.
+    binf = owned_copy(b)
+    binf[2] = BigFloat(Inf; precision = p)
+    @test_throws DomainError solve!(x, c, binf)
+    @test_throws DomainError solve_trusted!(x, c, binf)
+    # A finite factor whose diagonal is zeroed produces a non-finite result,
+    # which both paths reject.
+    c2 = BFLALUCache(NativeBackend())
+    prepare!(c2, n, p)
+    factorize!(c2, A)
+    factor_matrix(c2)[1, 1] = BigFloat(0; precision = p)
+    @test_throws DomainError solve!(x, c2, b)          # checked: factor finite but result non-finite
+    @test_throws DomainError solve_trusted!(x, c2, b)  # trusted: result non-finite
+    # A good solve still works and is finite.
+    solve_trusted!(x, c, b)
+    @test all(isfinite, x)
 end

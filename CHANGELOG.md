@@ -3,7 +3,7 @@
 All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [0.2.0] - 2026-08-24
+## [0.2.0] - 2026-08-25
 
 ### Added
 
@@ -40,6 +40,22 @@ All notable changes to this project are documented here. The format is based on
   `residual_precision` keyword (cache refinement is factor-precision-only).
 
 ### Changed (follow-up)
+
+- Unified factor-integrity validation (`_validate_factor_shape` /
+  `_validate_factor_metadata`) shared by the ordinary allocating factors and the
+  reusable caches: LU pivot step range + permutation consistency, LDLT
+  perm/blocks/subdiag consistency, RRQR tau length/precision + jpvt permutation
+  + rank + rank-policy scalars. Wired into the checked `ldiv!`/`solve!`/
+  `factor_diagnostics`/`factor_inertia` paths; the trusted paths skip the
+  rescan. Malformed metadata now throws a clear error instead of a `BoundsError`
+  or segfault.
+- Refactor exception atomicity: cache `factorize!` runs preflight checks before
+  mutating factor storage and never leaves a stale `:success` status on an
+  exception; failure/recovery is explicit.
+- Cache solve finite semantics: checked and trusted solves reject a non-finite
+  RHS and a non-finite solve result (pure scans, no Julia allocation).
+- Malformed-factor fuzz test suite (no crash / no out-of-bounds on corrupted
+  metadata).
 
 - Added the checked factor-integrity contract: `solve!(x, cache, b)` and
   `refine_once!(cache, A, x, b)` re-validate the owned factor storage precision,

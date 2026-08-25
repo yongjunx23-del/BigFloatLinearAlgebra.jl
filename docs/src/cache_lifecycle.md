@@ -57,6 +57,21 @@ independent.
   place, allocating no new `BigFloat` objects. SDPX should call this on the hot
   path and guarantee `x`'s ownership.
 
+## Factor-integrity contract
+
+The checked paths (`solve!`, `refine_once!`, `factor_diagnostics`,
+`factor_inertia`) re-validate the owned factor storage precision, finiteness,
+and metadata consistency on every call, mirroring the ordinary allocating
+factor API where `ldiv!` rescans the factor while `ldiv_trusted!` skips it. The
+trusted paths (`solve_trusted!`, `refine_once_trusted!`) skip the factor
+rescan — their caller guarantees the factor is unchanged — but still reject a
+non-finite RHS and a non-finite solve result. A caller that mutates
+`factor_matrix(cache)` must `invalidate!`/re-`factorize!` before a checked use;
+the checked paths throw a clear error (never a `BoundsError`, segfault, or
+silent wrong result) on malformed metadata such as an out-of-range pivot, an
+inconsistent permutation, invalid LDLT pivot blocks, or an invalid RRQR
+rank/`tau`/`jpvt`.
+
 ## Invariants
 
 1. **Precision or size change is explicit.** Changing `n` or the precision is a

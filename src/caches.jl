@@ -104,9 +104,9 @@ function _validate_cache_factor!(cache::AbstractFactorCache, op::AbstractString)
     _cache_factor_storage_finite(cache) || throw(DomainError(
         cache.factors, "$op: factor storage contains non-finite entries",
     ))
-    _cache_factor_metadata_valid(cache) || throw(ArgumentError(
-        "$op: factor metadata is inconsistent",
-    ))
+    # Reuse the same metadata rules as the ordinary allocating factors so the
+    # two code paths cannot drift.
+    _validate_factor_metadata(cache, op)
     return nothing
 end
 
@@ -356,21 +356,27 @@ function factorize!(
     _require_cache_matrix(cache, A, "factorize!")
     triangle = cache.triangle
     _require_valid_triangle(triangle, "factorize!")
-    _cache_copy_into!(cache.factors, A, "factorize!")
-    factors = cache.factors
-    if !_triangle_finite(factors, triangle)
-        cache.status = FactorStatus(:nonfinite, nothing)
-        return cache
+    cache.status = FactorStatus(:unprepared, nothing)
+    try
+        _cache_copy_into!(cache.factors, A, "factorize!")
+        factors = cache.factors
+        if !_triangle_finite(factors, triangle)
+            cache.status = FactorStatus(:nonfinite, nothing)
+            return cache
+        end
+        info = _cache_cholesky_dispatch!(
+            cache.backend, factors, triangle, cache.precision_bits, cache.scalars,
+        )
+        if !_triangle_finite(factors, triangle)
+            cache.status = FactorStatus(:nonfinite, nothing)
+            return cache
+        end
+        cache.status = info == 0 ? SUCCESS_STATUS :
+            FactorStatus(:not_positive_definite, info)
+    catch
+        cache.status = FactorStatus(:unprepared, nothing)
+        rethrow()
     end
-    info = _cache_cholesky_dispatch!(
-        cache.backend, factors, triangle, cache.precision_bits, cache.scalars,
-    )
-    if !_triangle_finite(factors, triangle)
-        cache.status = FactorStatus(:nonfinite, nothing)
-        return cache
-    end
-    cache.status = info == 0 ? SUCCESS_STATUS :
-        FactorStatus(:not_positive_definite, info)
     return cache
 end
 
@@ -457,6 +463,7 @@ function solve!(
         cache.backend, cache.factors, cache.triangle, cache.precision_bits,
         x, workspace, worker,
     )
+    _cache_check_solve_result!(x, "solve!")
     return x
 end
 
@@ -481,6 +488,7 @@ function solve_trusted!(
         cache.backend, cache.factors, cache.triangle, cache.precision_bits,
         x, workspace, worker,
     )
+    _cache_check_solve_result!(x, "solve_trusted!")
     return x
 end
 
@@ -567,6 +575,9 @@ function _cache_checked_solve_check!(x, cache, b, op)
         "$op: cache, solution and right-hand side dimensions differ",
     ))
     _require_cache_rhs(cache, b, op)
+    _all_finite(b) || throw(DomainError(
+        b, "$op: right-hand side contains non-finite entries",
+    ))
     _require_no_alias(x, cache.factors, op)
     Base.mightalias(x, b) && throw(ArgumentError(
         "$op: solution must not alias the right-hand side",
@@ -574,17 +585,30 @@ function _cache_checked_solve_check!(x, cache, b, op)
     return nothing
 end
 
-# Minimal validation for the trusted `solve_trusted!`: status, dimensions, and
-# aliasing against the factor and the RHS. The caller still guarantees the
-# destination's independent BigFloat ownership and precision.
+# Minimal validation for the trusted `solve_trusted!`: status, dimensions, RHS
+# finiteness, and aliasing against the factor and the RHS. The caller still
+# guarantees the destination's independent BigFloat ownership and precision.
 function _cache_trusted_solve_check!(x, cache, b, op)
     _cache_require_success(cache, op)
     (size(x, 1) == cache.n && size(b, 1) == cache.n) || throw(DimensionMismatch(
         "$op: cache, solution and right-hand side dimensions differ",
     ))
+    _all_finite(b) || throw(DomainError(
+        b, "$op: right-hand side contains non-finite entries",
+    ))
     _require_no_alias(x, cache.factors, op)
     Base.mightalias(x, b) && throw(ArgumentError(
         "$op: solution must not alias the right-hand side",
+    ))
+    return nothing
+end
+
+# Post-solve finiteness check: a solve that produced a non-finite result is a
+# hard error (never silently returned). A pure scan, so it does not add Julia
+# allocation to the zero-allocation trusted gate.
+@inline function _cache_check_solve_result!(x, op::AbstractString)
+    _all_finite(x) || throw(DomainError(
+        x, "$op: solve produced non-finite entries",
     ))
     return nothing
 end
@@ -663,21 +687,31 @@ function factorize!(
     cache::BFLALUCache,
     A::AbstractMatrix{BigFloat},
 )
+    # Preflight: shape/precision checks that do not mutate factor storage. A
+    # preflight error preserves the previous (possibly successful) factor.
     _cache_require_prepared(cache, "factorize!")
     _require_cache_matrix(cache, A, "factorize!")
-    _cache_copy_into!(cache.factors, A, "factorize!")
-    factors = cache.factors
-    if !_all_finite(factors)
-        cache.status = FactorStatus(:nonfinite, nothing)
-        return cache
+    # Commit phase: invalidate the old success first, then factorize. Any
+    # exception leaves the status non-success (never a stale :success).
+    cache.status = FactorStatus(:unprepared, nothing)
+    try
+        _cache_copy_into!(cache.factors, A, "factorize!")
+        factors = cache.factors
+        if !_all_finite(factors)
+            cache.status = FactorStatus(:nonfinite, nothing)
+            return cache
+        end
+        info = _cache_lu!(cache)
+        if !_all_finite(factors)
+            cache.status = FactorStatus(:nonfinite, nothing)
+            return cache
+        end
+        _lu_rebuild_perm!(cache.perm, cache.pivots)
+        cache.status = info == 0 ? SUCCESS_STATUS : FactorStatus(:singular, info)
+    catch
+        cache.status = FactorStatus(:unprepared, nothing)
+        rethrow()
     end
-    info = _cache_lu!(cache)
-    if !_all_finite(factors)
-        cache.status = FactorStatus(:nonfinite, nothing)
-        return cache
-    end
-    _lu_rebuild_perm!(cache.perm, cache.pivots)
-    cache.status = info == 0 ? SUCCESS_STATUS : FactorStatus(:singular, info)
     return cache
 end
 
@@ -766,6 +800,7 @@ function solve!(
         cache.backend, cache.factors, cache.pivots, cache.precision_bits,
         x, workspace, worker,
     )
+    _cache_check_solve_result!(x, "solve!")
     return x
 end
 
@@ -790,6 +825,7 @@ function solve_trusted!(
         cache.backend, cache.factors, cache.pivots, cache.precision_bits,
         x, workspace, worker,
     )
+    _cache_check_solve_result!(x, "solve_trusted!")
     return x
 end
 
@@ -854,6 +890,7 @@ valid after a successful `factorize!`.
 """
 function factor_inertia(cache::BFLALDLTCache)
     _cache_require_success(cache, "factor_inertia")
+    _validate_factor_metadata(cache, "factor_inertia")
     return _factor_inertia_unchecked(cache)
 end
 
@@ -893,19 +930,25 @@ function factorize!(
 )
     _cache_require_prepared(cache, "factorize!")
     _require_cache_matrix(cache, A, "factorize!")
-    _cache_copy_into!(cache.factors, A, "factorize!")
-    factors = cache.factors
-    if !_triangle_finite(factors, Lower)
-        cache.status = FactorStatus(:nonfinite, nothing)
-        return cache
+    cache.status = FactorStatus(:unprepared, nothing)
+    try
+        _cache_copy_into!(cache.factors, A, "factorize!")
+        factors = cache.factors
+        if !_triangle_finite(factors, Lower)
+            cache.status = FactorStatus(:nonfinite, nothing)
+            return cache
+        end
+        info = _cache_ldlt!(cache)
+        if !_triangle_finite(factors, Lower)
+            cache.status = FactorStatus(:nonfinite, nothing)
+            return cache
+        end
+        cache.status = info == 0 ? SUCCESS_STATUS :
+            FactorStatus(:pivot_failure, info)
+    catch
+        cache.status = FactorStatus(:unprepared, nothing)
+        rethrow()
     end
-    info = _cache_ldlt!(cache)
-    if !_triangle_finite(factors, Lower)
-        cache.status = FactorStatus(:nonfinite, nothing)
-        return cache
-    end
-    cache.status = info == 0 ? SUCCESS_STATUS :
-        FactorStatus(:pivot_failure, info)
     return cache
 end
 
@@ -934,6 +977,7 @@ function solve!(
     _cache_rhs_repair!(x, b, "solve!")
     workspace, worker = _cache_solve_workspace(cache, 1)
     _ldlt_solve!(cache.backend, cache, x, workspace, worker)
+    _cache_check_solve_result!(x, "solve!")
     return x
 end
 
@@ -955,6 +999,7 @@ function solve_trusted!(
     _cache_rhs_write!(x, b, "solve_trusted!")
     workspace, worker = _cache_solve_workspace(cache, 1)
     _ldlt_solve!(cache.backend, cache, x, workspace, worker)
+    _cache_check_solve_result!(x, "solve_trusted!")
     return x
 end
 
@@ -1098,32 +1143,39 @@ function factorize!(
 )
     _cache_require_prepared(cache, "factorize!")
     _require_cache_matrix(cache, A, "factorize!")
-    _cache_copy_into!(cache.factors, A, "factorize!")
-    p = cache.precision_bits
-    factors = cache.factors
-    if !_all_finite(factors)
-        cache.status = FactorStatus(:nonfinite, nothing)
-        return cache
-    end
+    # Rank-policy preflight (does not mutate factor storage).
     absolute, relative, scale, threshold = _qr_rank_policy(
-        A, p, tol, atol, rtol, "factorize!",
+        A, cache.precision_bits, tol, atol, rtol, "factorize!",
     )
-    zero_threshold = BigFloat(0; precision = p)
-    tau, jpvt, _ = _qr!(cache.backend, factors, p, zero_threshold)
-    if !_all_finite(factors) || !_all_finite(tau)
-        cache.status = FactorStatus(:nonfinite, nothing)
-        return cache
+    cache.status = FactorStatus(:unprepared, nothing)
+    try
+        _cache_copy_into!(cache.factors, A, "factorize!")
+        p = cache.precision_bits
+        factors = cache.factors
+        if !_all_finite(factors)
+            cache.status = FactorStatus(:nonfinite, nothing)
+            return cache
+        end
+        zero_threshold = BigFloat(0; precision = p)
+        tau, jpvt, _ = _qr!(cache.backend, factors, p, zero_threshold)
+        if !_all_finite(factors) || !_all_finite(tau)
+            cache.status = FactorStatus(:nonfinite, nothing)
+            return cache
+        end
+        rank = _qr_rank_from_factors(factors, threshold)
+        cache.tau = tau
+        cache.jpvt = jpvt
+        cache.rank = rank
+        cache.tolerance = MA.mutable_copy(absolute)
+        cache.atol = MA.mutable_copy(absolute)
+        cache.rtol = MA.mutable_copy(relative)
+        cache.reference_scale = MA.mutable_copy(scale)
+        cache.effective_threshold = MA.mutable_copy(threshold)
+        cache.status = SUCCESS_STATUS
+    catch
+        cache.status = FactorStatus(:unprepared, nothing)
+        rethrow()
     end
-    rank = _qr_rank_from_factors(factors, threshold)
-    cache.tau = tau
-    cache.jpvt = jpvt
-    cache.rank = rank
-    cache.tolerance = MA.mutable_copy(absolute)
-    cache.atol = MA.mutable_copy(absolute)
-    cache.rtol = MA.mutable_copy(relative)
-    cache.reference_scale = MA.mutable_copy(scale)
-    cache.effective_threshold = MA.mutable_copy(threshold)
-    cache.status = SUCCESS_STATUS
     return cache
 end
 
@@ -1136,6 +1188,7 @@ function solve!(
     _cache_rhs_repair!(x, b, "solve!")
     workspace, worker = _cache_solve_workspace(cache, 1)
     _qr_solve!(cache.backend, cache, x, workspace, worker)
+    _cache_check_solve_result!(x, "solve!")
     return x
 end
 
@@ -1157,6 +1210,7 @@ function solve_trusted!(
     _cache_rhs_write!(x, b, "solve_trusted!")
     workspace, worker = _cache_solve_workspace(cache, 1)
     _qr_solve!(cache.backend, cache, x, workspace, worker)
+    _cache_check_solve_result!(x, "solve_trusted!")
     return x
 end
 
@@ -1182,6 +1236,7 @@ end
 
 function factor_diagnostics(cache::BFLALUCache)
     _cache_require_success(cache, "factor_diagnostics")
+    _validate_factor_metadata(cache, "factor_diagnostics")
     return (
         factor_kind = factor_kind(cache),
         row_swap_count = count(k -> cache.pivots[k] != k, eachindex(cache.pivots)),
@@ -1192,6 +1247,7 @@ end
 
 function factor_diagnostics(cache::BFLALDLTCache)
     _cache_require_success(cache, "factor_diagnostics")
+    _validate_factor_metadata(cache, "factor_diagnostics")
     inertia = _factor_inertia_unchecked(cache)
     return (
         factor_kind = factor_kind(cache),
@@ -1204,6 +1260,7 @@ end
 
 function factor_diagnostics(cache::BFLARRQRCache)
     _cache_require_success(cache, "factor_diagnostics")
+    _validate_factor_metadata(cache, "factor_diagnostics")
     return (
         factor_kind = factor_kind(cache),
         rank = cache.rank,
@@ -1400,44 +1457,3 @@ end
 function _cache_factor_storage_finite(cache::BFLARRQRCache)
     return _all_finite(cache.factors) && _all_finite(cache.tau)
 end
-
-function _cache_factor_metadata_valid(cache::BFLACholeskyCache)
-    return true
-end
-function _cache_factor_metadata_valid(cache::BFLALUCache)
-    n = cache.n
-    length(cache.pivots) == n || return false
-    length(cache.perm) == n || return false
-    # Pivot values must be valid row indices in 1:n (an out-of-range pivot would
-    # otherwise corrupt memory during the solve).
-    @inbounds for k in 1:n
-        (1 <= cache.pivots[k] <= n) || return false
-    end
-    # `perm` must be a permutation of 1:n.
-    seen = falses(n)
-    @inbounds for i in 1:n
-        p = cache.perm[i]
-        (1 <= p <= n && !seen[p]) || return false
-        seen[p] = true
-    end
-    return true
-end
-function _cache_factor_metadata_valid(cache::BFLALDLTCache)
-    n = cache.n
-    sum(cache.blocks) == n || return false
-    return all(b -> b == 1 || b == 2, cache.blocks)
-end
-function _cache_factor_metadata_valid(cache::BFLARRQRCache)
-    n = cache.n
-    (0 <= cache.rank <= n) || return false
-    length(cache.jpvt) == n || return false
-    # jpvt must be a permutation of 1:n.
-    seen = falses(n)
-    @inbounds for i in 1:n
-        p = cache.jpvt[i]
-        (1 <= p <= n && !seen[p]) || return false
-        seen[p] = true
-    end
-    return true
-end
-

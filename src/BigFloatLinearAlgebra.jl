@@ -34,6 +34,7 @@ include("lu.jl")
 include("quality.jl")
 include("generic_backend.jl")
 include("native_backend.jl")
+include("factor_integrity.jl")
 include("caches.jl")
 
 # These factories keep the optional LinearSolve integration discoverable from
