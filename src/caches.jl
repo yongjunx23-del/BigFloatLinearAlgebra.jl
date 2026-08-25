@@ -80,6 +80,36 @@ function _cache_require_success(cache::AbstractFactorCache, op::AbstractString)
     return nothing
 end
 
+# --- checked factor-integrity contract --------------------------------------
+
+# The checked solve/refine paths re-validate the cache's owned factor storage
+# and metadata on every call, because a caller holding `factor_matrix(cache)`
+# may mutate it without invalidating the cache. This mirrors the ordinary
+# factor API, where `ldiv!` rescans factor precision/finiteness while
+# `ldiv_trusted!` skips them. The trusted paths skip this rescan.
+
+"""
+    _validate_cache_factor!(cache, op)
+
+Re-validate the cache's owned factor storage precision and finiteness and the
+metadata consistency, throwing a clear error on a mutated/invalid factor. Used
+by the checked [`solve!`](@ref) and [`refine_once!`](@ref); the trusted paths
+skip this scan because their caller guarantees the factor is unchanged.
+"""
+function _validate_cache_factor!(cache::AbstractFactorCache, op::AbstractString)
+    actual = _require_precision(_check_precision(cache.factors), op)
+    actual == cache.precision_bits || throw(PrecisionMismatch(
+        cache.precision_bits, actual, nothing,
+    ))
+    _cache_factor_storage_finite(cache) || throw(DomainError(
+        cache.factors, "$op: factor storage contains non-finite entries",
+    ))
+    _cache_factor_metadata_valid(cache) || throw(ArgumentError(
+        "$op: factor metadata is inconsistent",
+    ))
+    return nothing
+end
+
 function _require_cache_matrix(cache, A::AbstractMatrix{BigFloat}, op::AbstractString)
     n = cache.n
     size(A) == (n, n) || throw(DimensionMismatch(
@@ -532,6 +562,7 @@ end
 # and aliasing of the solution against both the factor and the RHS.
 function _cache_checked_solve_check!(x, cache, b, op)
     _cache_require_success(cache, op)
+    _validate_cache_factor!(cache, op)
     (size(x, 1) == cache.n && size(b, 1) == cache.n) || throw(DimensionMismatch(
         "$op: cache, solution and right-hand side dimensions differ",
     ))
@@ -1203,6 +1234,7 @@ function refine_once!(
     b::AbstractVecOrMat{BigFloat},
 )
     _cache_require_success(cache, "refine_once!")
+    _validate_cache_factor!(cache, "refine_once!")
     _require_cache_matrix(cache, A, "refine_once!")
     _require_cache_rhs(cache, b, "refine_once!")
     size(x) == size(b) || throw(DimensionMismatch(
@@ -1354,3 +1386,58 @@ function _cache_solve_inplace!(cache::BFLARRQRCache, x::AbstractVecOrMat{BigFloa
     _qr_solve!(cache.backend, cache, x, workspace, worker)
     return x
 end
+
+
+function _cache_factor_storage_finite(cache::BFLACholeskyCache)
+    return _triangle_finite(cache.factors, cache.triangle)
+end
+function _cache_factor_storage_finite(cache::BFLALUCache)
+    return _all_finite(cache.factors)
+end
+function _cache_factor_storage_finite(cache::BFLALDLTCache)
+    return _triangle_finite(cache.factors, Lower)
+end
+function _cache_factor_storage_finite(cache::BFLARRQRCache)
+    return _all_finite(cache.factors) && _all_finite(cache.tau)
+end
+
+function _cache_factor_metadata_valid(cache::BFLACholeskyCache)
+    return true
+end
+function _cache_factor_metadata_valid(cache::BFLALUCache)
+    n = cache.n
+    length(cache.pivots) == n || return false
+    length(cache.perm) == n || return false
+    # Pivot values must be valid row indices in 1:n (an out-of-range pivot would
+    # otherwise corrupt memory during the solve).
+    @inbounds for k in 1:n
+        (1 <= cache.pivots[k] <= n) || return false
+    end
+    # `perm` must be a permutation of 1:n.
+    seen = falses(n)
+    @inbounds for i in 1:n
+        p = cache.perm[i]
+        (1 <= p <= n && !seen[p]) || return false
+        seen[p] = true
+    end
+    return true
+end
+function _cache_factor_metadata_valid(cache::BFLALDLTCache)
+    n = cache.n
+    sum(cache.blocks) == n || return false
+    return all(b -> b == 1 || b == 2, cache.blocks)
+end
+function _cache_factor_metadata_valid(cache::BFLARRQRCache)
+    n = cache.n
+    (0 <= cache.rank <= n) || return false
+    length(cache.jpvt) == n || return false
+    # jpvt must be a permutation of 1:n.
+    seen = falses(n)
+    @inbounds for i in 1:n
+        p = cache.jpvt[i]
+        (1 <= p <= n && !seen[p]) || return false
+        seen[p] = true
+    end
+    return true
+end
+
