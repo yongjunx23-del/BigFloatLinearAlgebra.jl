@@ -356,21 +356,27 @@ function factorize!(
     _require_cache_matrix(cache, A, "factorize!")
     triangle = cache.triangle
     _require_valid_triangle(triangle, "factorize!")
-    _cache_copy_into!(cache.factors, A, "factorize!")
-    factors = cache.factors
-    if !_triangle_finite(factors, triangle)
-        cache.status = FactorStatus(:nonfinite, nothing)
-        return cache
+    cache.status = FactorStatus(:unprepared, nothing)
+    try
+        _cache_copy_into!(cache.factors, A, "factorize!")
+        factors = cache.factors
+        if !_triangle_finite(factors, triangle)
+            cache.status = FactorStatus(:nonfinite, nothing)
+            return cache
+        end
+        info = _cache_cholesky_dispatch!(
+            cache.backend, factors, triangle, cache.precision_bits, cache.scalars,
+        )
+        if !_triangle_finite(factors, triangle)
+            cache.status = FactorStatus(:nonfinite, nothing)
+            return cache
+        end
+        cache.status = info == 0 ? SUCCESS_STATUS :
+            FactorStatus(:not_positive_definite, info)
+    catch
+        cache.status = FactorStatus(:unprepared, nothing)
+        rethrow()
     end
-    info = _cache_cholesky_dispatch!(
-        cache.backend, factors, triangle, cache.precision_bits, cache.scalars,
-    )
-    if !_triangle_finite(factors, triangle)
-        cache.status = FactorStatus(:nonfinite, nothing)
-        return cache
-    end
-    cache.status = info == 0 ? SUCCESS_STATUS :
-        FactorStatus(:not_positive_definite, info)
     return cache
 end
 
@@ -663,21 +669,31 @@ function factorize!(
     cache::BFLALUCache,
     A::AbstractMatrix{BigFloat},
 )
+    # Preflight: shape/precision checks that do not mutate factor storage. A
+    # preflight error preserves the previous (possibly successful) factor.
     _cache_require_prepared(cache, "factorize!")
     _require_cache_matrix(cache, A, "factorize!")
-    _cache_copy_into!(cache.factors, A, "factorize!")
-    factors = cache.factors
-    if !_all_finite(factors)
-        cache.status = FactorStatus(:nonfinite, nothing)
-        return cache
+    # Commit phase: invalidate the old success first, then factorize. Any
+    # exception leaves the status non-success (never a stale :success).
+    cache.status = FactorStatus(:unprepared, nothing)
+    try
+        _cache_copy_into!(cache.factors, A, "factorize!")
+        factors = cache.factors
+        if !_all_finite(factors)
+            cache.status = FactorStatus(:nonfinite, nothing)
+            return cache
+        end
+        info = _cache_lu!(cache)
+        if !_all_finite(factors)
+            cache.status = FactorStatus(:nonfinite, nothing)
+            return cache
+        end
+        _lu_rebuild_perm!(cache.perm, cache.pivots)
+        cache.status = info == 0 ? SUCCESS_STATUS : FactorStatus(:singular, info)
+    catch
+        cache.status = FactorStatus(:unprepared, nothing)
+        rethrow()
     end
-    info = _cache_lu!(cache)
-    if !_all_finite(factors)
-        cache.status = FactorStatus(:nonfinite, nothing)
-        return cache
-    end
-    _lu_rebuild_perm!(cache.perm, cache.pivots)
-    cache.status = info == 0 ? SUCCESS_STATUS : FactorStatus(:singular, info)
     return cache
 end
 
@@ -893,19 +909,25 @@ function factorize!(
 )
     _cache_require_prepared(cache, "factorize!")
     _require_cache_matrix(cache, A, "factorize!")
-    _cache_copy_into!(cache.factors, A, "factorize!")
-    factors = cache.factors
-    if !_triangle_finite(factors, Lower)
-        cache.status = FactorStatus(:nonfinite, nothing)
-        return cache
+    cache.status = FactorStatus(:unprepared, nothing)
+    try
+        _cache_copy_into!(cache.factors, A, "factorize!")
+        factors = cache.factors
+        if !_triangle_finite(factors, Lower)
+            cache.status = FactorStatus(:nonfinite, nothing)
+            return cache
+        end
+        info = _cache_ldlt!(cache)
+        if !_triangle_finite(factors, Lower)
+            cache.status = FactorStatus(:nonfinite, nothing)
+            return cache
+        end
+        cache.status = info == 0 ? SUCCESS_STATUS :
+            FactorStatus(:pivot_failure, info)
+    catch
+        cache.status = FactorStatus(:unprepared, nothing)
+        rethrow()
     end
-    info = _cache_ldlt!(cache)
-    if !_triangle_finite(factors, Lower)
-        cache.status = FactorStatus(:nonfinite, nothing)
-        return cache
-    end
-    cache.status = info == 0 ? SUCCESS_STATUS :
-        FactorStatus(:pivot_failure, info)
     return cache
 end
 
@@ -1098,32 +1120,39 @@ function factorize!(
 )
     _cache_require_prepared(cache, "factorize!")
     _require_cache_matrix(cache, A, "factorize!")
-    _cache_copy_into!(cache.factors, A, "factorize!")
-    p = cache.precision_bits
-    factors = cache.factors
-    if !_all_finite(factors)
-        cache.status = FactorStatus(:nonfinite, nothing)
-        return cache
-    end
+    # Rank-policy preflight (does not mutate factor storage).
     absolute, relative, scale, threshold = _qr_rank_policy(
-        A, p, tol, atol, rtol, "factorize!",
+        A, cache.precision_bits, tol, atol, rtol, "factorize!",
     )
-    zero_threshold = BigFloat(0; precision = p)
-    tau, jpvt, _ = _qr!(cache.backend, factors, p, zero_threshold)
-    if !_all_finite(factors) || !_all_finite(tau)
-        cache.status = FactorStatus(:nonfinite, nothing)
-        return cache
+    cache.status = FactorStatus(:unprepared, nothing)
+    try
+        _cache_copy_into!(cache.factors, A, "factorize!")
+        p = cache.precision_bits
+        factors = cache.factors
+        if !_all_finite(factors)
+            cache.status = FactorStatus(:nonfinite, nothing)
+            return cache
+        end
+        zero_threshold = BigFloat(0; precision = p)
+        tau, jpvt, _ = _qr!(cache.backend, factors, p, zero_threshold)
+        if !_all_finite(factors) || !_all_finite(tau)
+            cache.status = FactorStatus(:nonfinite, nothing)
+            return cache
+        end
+        rank = _qr_rank_from_factors(factors, threshold)
+        cache.tau = tau
+        cache.jpvt = jpvt
+        cache.rank = rank
+        cache.tolerance = MA.mutable_copy(absolute)
+        cache.atol = MA.mutable_copy(absolute)
+        cache.rtol = MA.mutable_copy(relative)
+        cache.reference_scale = MA.mutable_copy(scale)
+        cache.effective_threshold = MA.mutable_copy(threshold)
+        cache.status = SUCCESS_STATUS
+    catch
+        cache.status = FactorStatus(:unprepared, nothing)
+        rethrow()
     end
-    rank = _qr_rank_from_factors(factors, threshold)
-    cache.tau = tau
-    cache.jpvt = jpvt
-    cache.rank = rank
-    cache.tolerance = MA.mutable_copy(absolute)
-    cache.atol = MA.mutable_copy(absolute)
-    cache.rtol = MA.mutable_copy(relative)
-    cache.reference_scale = MA.mutable_copy(scale)
-    cache.effective_threshold = MA.mutable_copy(threshold)
-    cache.status = SUCCESS_STATUS
     return cache
 end
 

@@ -707,3 +707,56 @@ end
     cq2.jpvt[1] = -1
     @test_throws ArgumentError solve!(x, cq2, b)
 end
+
+@testset "refactor exception atomicity" begin
+    p = 256
+    n = 8
+    rng = MersenneTwister(606)
+    A = _square_fixture(n, p, rng)
+    b = owned_zeros(BigFloat, n; precision_bits = p)
+    for i in 1:n
+        b[i] = BigFloat(i; precision = p)
+    end
+    x = owned_zeros(BigFloat, n; precision_bits = p)
+
+    # RRQR: a negative tolerance is a preflight error that must NOT invalidate
+    # the previous successful factor.
+    cq = BFLARRQRCache(NativeBackend())
+    prepare!(cq, n, p)
+    factorize!(cq, A)
+    @test issuccess(cq)
+    @test_throws DomainError factorize!(cq, A; atol = BigFloat(-1; precision = p))
+    @test issuccess(cq)   # old factor preserved (preflight error)
+
+    # A nonfinite input is a commit-phase failure: status becomes non-success.
+    Anan = owned_copy(A)
+    Anan[1, 1] = BigFloat(NaN; precision = p)
+    factorize!(cq, Anan)
+    @test !issuccess(cq)
+    @test factor_status(cq).kind == :nonfinite
+    @test_throws ArgumentError solve_trusted!(x, cq, b)  # not success -> rejected
+
+    # Recovery: a good factorization restores success.
+    factorize!(cq, A)
+    @test issuccess(cq)
+    solve_trusted!(x, cq, b)
+    @test isfinite(_backward_error(A, x, b, p))
+
+    # LU: a singular input leaves a non-success status, then recovery works.
+    c = BFLALUCache(NativeBackend())
+    prepare!(c, n, p)
+    factorize!(c, A)
+    @test issuccess(c)
+    As = owned_copy(A)
+    for j in 1:n
+        As[2, j] = BigFloat(0; precision = p)
+    end
+    factorize!(c, As)
+    @test !issuccess(c)
+    @test factor_status(c).kind == :singular
+    @test_throws ArgumentError solve_trusted!(x, c, b)
+    factorize!(c, A)
+    @test issuccess(c)
+    solve_trusted!(x, c, b)
+    @test isfinite(_backward_error(A, x, b, p))
+end
