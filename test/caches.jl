@@ -650,3 +650,60 @@ end
     r2 = refine_once!(c, A, x, b)
     @test isfinite(r2.backward_error_after)
 end
+
+@testset "checked factor-integrity contract" begin
+    p = 256
+    n = 8
+    rng = MersenneTwister(909)
+    A = _square_fixture(n, p, rng)
+    b = owned_zeros(BigFloat, n; precision_bits = p)
+    for i in 1:n
+        b[i] = BigFloat(i; precision = p)
+    end
+    x = owned_zeros(BigFloat, n; precision_bits = p)
+
+    # LU: a mutated factor matrix (NaN) is rejected by checked solve!, while the
+    # trusted path keeps its explicit caller contract (no rescan).
+    c = BFLALUCache(NativeBackend())
+    prepare!(c, n, p)
+    factorize!(c, A)
+    Fm = factor_matrix(c)
+    Fm[1, 1] = BigFloat(NaN; precision = p)
+    @test_throws DomainError solve!(x, c, b)
+    @test_throws DomainError refine_once!(c, A, x, b)
+    solve_trusted!(x, c, b)  # trusted does not rescan factor storage
+
+    # a precision-mutated factor matrix is rejected by checked
+    c2 = BFLALUCache(NativeBackend())
+    prepare!(c2, n, p)
+    factorize!(c2, A)
+    factor_matrix(c2)[1, 1] = BigFloat(1; precision = 128)
+    @test_throws PrecisionMismatch solve!(x, c2, b)
+
+    # invalid LU pivot metadata is rejected by checked
+    c3 = BFLALUCache(NativeBackend())
+    prepare!(c3, n, p)
+    factorize!(c3, A)
+    c3.pivots[1] = n + 5
+    @test_throws ArgumentError solve!(x, c3, b)
+
+    # LDLT: invalid block metadata rejected by checked.
+    Aind = _indefinite_fixture(n, p, rng)
+    cl = BFLALDLTCache(NativeBackend())
+    prepare!(cl, n, p)
+    factorize!(cl, Aind)
+    cl.blocks = [1, 1, 1, 1, 1, 1, 1, 2]  # sums to 10 != 8
+    @test_throws ArgumentError solve!(x, cl, b)
+
+    # RRQR: invalid jpvt / rank rejected by checked.
+    cq = BFLARRQRCache(NativeBackend())
+    prepare!(cq, n, p)
+    factorize!(cq, A)
+    cq.rank = n + 3
+    @test_throws ArgumentError solve!(x, cq, b)
+    cq2 = BFLARRQRCache(NativeBackend())
+    prepare!(cq2, n, p)
+    factorize!(cq2, A)
+    cq2.jpvt[1] = -1
+    @test_throws ArgumentError solve!(x, cq2, b)
+end

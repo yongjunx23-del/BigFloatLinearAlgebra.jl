@@ -3,7 +3,7 @@
 All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [Unreleased]
+## [0.2.0] - 2026-08-24
 
 ### Added
 
@@ -38,9 +38,15 @@ All notable changes to this project are documented here. The format is based on
   via `prepare_refinement!`; `invalidate!` preserves reusable refinement
   storage; the cache `refine_once!` no longer accepts a silently-ignored
   `residual_precision` keyword (cache refinement is factor-precision-only).
-- Version is planned as **0.2.0** (new public API).
 
 ### Changed (follow-up)
+
+- Added the checked factor-integrity contract: `solve!(x, cache, b)` and
+  `refine_once!(cache, A, x, b)` re-validate the owned factor storage precision,
+  finiteness, and metadata consistency on every call (mirroring the ordinary
+  factor `ldiv!`/`ldiv_trusted!` split), while the trusted paths skip the
+  rescan. LU and RRQR metadata checks also validate pivot/jpvt/permutation value
+  ranges, preventing a memory-safety fault on out-of-range pivots.
 
 - Added `refine_once_trusted!` (solver-facing) alongside the checked
   `refine_once!`; both reject solution aliasing against the factor and the RHS,
