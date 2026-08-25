@@ -7,6 +7,10 @@ on:
         description: Version to register or component to bump
         required: true
         default: "0.2.1"
+      release_notes:
+        description: Optional release notes (include 'breaking' or 'changelog' for a minor release)
+        required: false
+        default: ""
 
 permissions:
   contents: write
@@ -18,3 +22,4 @@ jobs:
       - uses: julia-actions/RegisterAction@v0.3.2
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
+          release_notes: ${{ inputs.release_notes }}
