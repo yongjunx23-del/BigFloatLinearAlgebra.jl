@@ -463,6 +463,7 @@ function solve!(
         cache.backend, cache.factors, cache.triangle, cache.precision_bits,
         x, workspace, worker,
     )
+    _cache_check_solve_result!(x, "solve!")
     return x
 end
 
@@ -487,6 +488,7 @@ function solve_trusted!(
         cache.backend, cache.factors, cache.triangle, cache.precision_bits,
         x, workspace, worker,
     )
+    _cache_check_solve_result!(x, "solve_trusted!")
     return x
 end
 
@@ -573,6 +575,9 @@ function _cache_checked_solve_check!(x, cache, b, op)
         "$op: cache, solution and right-hand side dimensions differ",
     ))
     _require_cache_rhs(cache, b, op)
+    _all_finite(b) || throw(DomainError(
+        b, "$op: right-hand side contains non-finite entries",
+    ))
     _require_no_alias(x, cache.factors, op)
     Base.mightalias(x, b) && throw(ArgumentError(
         "$op: solution must not alias the right-hand side",
@@ -580,17 +585,30 @@ function _cache_checked_solve_check!(x, cache, b, op)
     return nothing
 end
 
-# Minimal validation for the trusted `solve_trusted!`: status, dimensions, and
-# aliasing against the factor and the RHS. The caller still guarantees the
-# destination's independent BigFloat ownership and precision.
+# Minimal validation for the trusted `solve_trusted!`: status, dimensions, RHS
+# finiteness, and aliasing against the factor and the RHS. The caller still
+# guarantees the destination's independent BigFloat ownership and precision.
 function _cache_trusted_solve_check!(x, cache, b, op)
     _cache_require_success(cache, op)
     (size(x, 1) == cache.n && size(b, 1) == cache.n) || throw(DimensionMismatch(
         "$op: cache, solution and right-hand side dimensions differ",
     ))
+    _all_finite(b) || throw(DomainError(
+        b, "$op: right-hand side contains non-finite entries",
+    ))
     _require_no_alias(x, cache.factors, op)
     Base.mightalias(x, b) && throw(ArgumentError(
         "$op: solution must not alias the right-hand side",
+    ))
+    return nothing
+end
+
+# Post-solve finiteness check: a solve that produced a non-finite result is a
+# hard error (never silently returned). A pure scan, so it does not add Julia
+# allocation to the zero-allocation trusted gate.
+@inline function _cache_check_solve_result!(x, op::AbstractString)
+    _all_finite(x) || throw(DomainError(
+        x, "$op: solve produced non-finite entries",
     ))
     return nothing
 end
@@ -782,6 +800,7 @@ function solve!(
         cache.backend, cache.factors, cache.pivots, cache.precision_bits,
         x, workspace, worker,
     )
+    _cache_check_solve_result!(x, "solve!")
     return x
 end
 
@@ -806,6 +825,7 @@ function solve_trusted!(
         cache.backend, cache.factors, cache.pivots, cache.precision_bits,
         x, workspace, worker,
     )
+    _cache_check_solve_result!(x, "solve_trusted!")
     return x
 end
 
@@ -956,6 +976,7 @@ function solve!(
     _cache_rhs_repair!(x, b, "solve!")
     workspace, worker = _cache_solve_workspace(cache, 1)
     _ldlt_solve!(cache.backend, cache, x, workspace, worker)
+    _cache_check_solve_result!(x, "solve!")
     return x
 end
 
@@ -977,6 +998,7 @@ function solve_trusted!(
     _cache_rhs_write!(x, b, "solve_trusted!")
     workspace, worker = _cache_solve_workspace(cache, 1)
     _ldlt_solve!(cache.backend, cache, x, workspace, worker)
+    _cache_check_solve_result!(x, "solve_trusted!")
     return x
 end
 
@@ -1165,6 +1187,7 @@ function solve!(
     _cache_rhs_repair!(x, b, "solve!")
     workspace, worker = _cache_solve_workspace(cache, 1)
     _qr_solve!(cache.backend, cache, x, workspace, worker)
+    _cache_check_solve_result!(x, "solve!")
     return x
 end
 
@@ -1186,6 +1209,7 @@ function solve_trusted!(
     _cache_rhs_write!(x, b, "solve_trusted!")
     workspace, worker = _cache_solve_workspace(cache, 1)
     _qr_solve!(cache.backend, cache, x, workspace, worker)
+    _cache_check_solve_result!(x, "solve_trusted!")
     return x
 end
 
