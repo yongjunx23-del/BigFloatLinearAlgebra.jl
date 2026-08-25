@@ -1,7 +1,7 @@
 name = "BigFloatLinearAlgebra"
 uuid = "44d352a4-380e-4c6a-9c2a-31e5bfe329aa"
 authors = ["Yongjun Xu", "OpenAI Codex"]
-version = "0.2.1"
+version = "0.2.2"
 
 [deps]
 LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"

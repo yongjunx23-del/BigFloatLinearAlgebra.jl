@@ -3,6 +3,22 @@
 All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.2.2] - 2026-08-25
+
+### Fixed
+
+- A successful Cholesky factor with a non-positive diagonal element (mutated
+  while keeping shape, precision, and finiteness intact) is now rejected by the
+  checked `solve!`/`ldiv!`, the cache checked `solve!`, the allocating
+  `solve(cache, b)`, and `factor_diagnostics`, instead of silently producing a
+  wrong result. The canonical positive-diagonal check lives in
+  `_validate_cholesky_metadata` and is reached only for a `:success` factor.
+- The cache trusted `solve_trusted!` now enforces the factor-precision contract
+  on both the solution and the RHS, mirroring the ordinary `ldiv_trusted!`
+  behavior: a solution or RHS whose precision differs from the cache's factor
+  precision throws `PrecisionMismatch`. The check reuses the existing precision
+  scan, so the zero-Julia-allocation trusted gate is preserved.
+
 ## [0.2.1] - 2026-08-25
 
 ### Added
