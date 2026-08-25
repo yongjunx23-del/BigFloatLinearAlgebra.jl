@@ -151,12 +151,8 @@ function _cholesky_ldiv!(
     if trusted
         _validate_trusted_rhs_precision(F, operation, rhs)
     else
-        _validate_factor_precision(F, operation, rhs)
-        _validate_factor_metadata(F, operation)
-        _triangle_finite(F.factors, F.triangle) || throw(DomainError(
-            F.factors,
-            "$operation: authoritative factor triangle contains non-finite entries",
-        ))
+        _validate_factor_integrity!(F, operation)
+        _validate_rhs_precision(F, operation, rhs)
     end
     _all_finite(rhs) || throw(DomainError(
         rhs, "$operation: right-hand side contains non-finite entries",

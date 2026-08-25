@@ -12,9 +12,16 @@
     _validate_factor_shape(F, op)
 
 Validate the factor's matrix shape (square for Cholesky/LU/LDLT; `m×n` for
-RRQR) and, for Cholesky, the authoritative triangle.
+RRQR) and, for Cholesky, the authoritative triangle. For a reusable cache this
+also verifies that the owned factor storage matches the cache's reserved order
+`cache.n` (a square-but-wrong-size factor is still rejected).
 """
 function _validate_factor_shape(F, op::AbstractString)
+    return _validate_factor_shape_impl(F, op)
+end
+
+# Shared shape rule used by both the ordinary factors and the caches.
+function _validate_factor_shape_impl(F, op::AbstractString)
     kind = factor_kind(F)
     m, n = size(F.factors)
     if kind === :rrqr
@@ -26,6 +33,91 @@ function _validate_factor_shape(F, op::AbstractString)
     end
     if kind === :cholesky
         _require_valid_triangle(factor_triangle(F), op)
+    end
+    return nothing
+end
+
+"""
+    _validate_factor_integrity!(F, op)
+
+The single checked entry point for factor-integrity validation. It validates, in
+order:
+
+1. factor matrix shape ([`_validate_factor_shape`](@ref));
+2. factor storage precision ([`_validate_factor_storage_precision`](@ref));
+3. factor storage finiteness ([`_validate_factor_storage_finite`](@ref));
+4. factor metadata consistency ([`_validate_factor_metadata`](@ref)).
+
+It is duck-typed and works on both the ordinary allocating factors and the
+reusable factor caches (which mirror the factor field names). The ordinary
+checked `ldiv!`/`solve!`, the cache checked `solve!`/`refine_once!`, and every
+checked accessor/diagnostic that reads factor internals call this entry. The
+trusted paths (`ldiv_trusted!`, `solve_trusted!`, `refine_once_trusted!`) skip
+it because their caller guarantees the factor is unchanged.
+"""
+function _validate_factor_integrity!(F, op::AbstractString)
+    _validate_factor_shape(F, op)
+    _validate_factor_storage_precision(F, op)
+    _validate_factor_storage_finite(F, op)
+    _validate_factor_metadata(F, op)
+    return nothing
+end
+
+"""
+    _validate_factor_storage_precision(F, op)
+
+Verify that the factor's mutable storage (the factor matrix and, for RRQR, the
+Householder `tau` and rank-policy scalars) carries the factor's recorded
+precision. Throws [`PrecisionMismatch`](@ref) on a mismatch.
+"""
+function _validate_factor_storage_precision(F, op::AbstractString)
+    actual = _require_precision(
+        _check_precision(factor_matrix(F), _factor_precision_operands(F)...),
+        op,
+    )
+    recorded = factor_precision(F)
+    actual == recorded || throw(PrecisionMismatch(recorded, actual, nothing))
+    return actual
+end
+
+"""
+    _validate_factor_storage_finite(F, op)
+
+Verify that the factor's mutable storage is finite. Cholesky/LDLT scan only the
+authoritative triangle; LU/RRQR scan the full factor matrix. RRQR additionally
+requires `tau` and every rank-policy scalar to be finite.
+"""
+function _validate_factor_storage_finite(F, op::AbstractString)
+    kind = factor_kind(F)
+    A = factor_matrix(F)
+    if kind === :cholesky
+        _triangle_finite(A, factor_triangle(F)) || throw(DomainError(
+            A, "$op: authoritative factor triangle contains non-finite entries",
+        ))
+    elseif kind === :ldlt
+        _triangle_finite(A, Lower) || throw(DomainError(
+            A, "$op: authoritative factor triangle contains non-finite entries",
+        ))
+    else
+        _all_finite(A) || throw(DomainError(
+            A, "$op: factor storage contains non-finite entries",
+        ))
+    end
+    if kind === :rrqr
+        _all_finite(F.tau) || throw(DomainError(
+            F.tau, "$op: RRQR tau contains non-finite entries",
+        ))
+        for (name, value) in (
+            (:tolerance, F.tolerance),
+            (:atol, F.atol),
+            (:rtol, F.rtol),
+            (:reference_scale, F.reference_scale),
+            (:effective_threshold, F.effective_threshold),
+        )
+            isfinite(value) || throw(DomainError(
+                value, "$op: RRQR $name must be finite",
+            ))
+        end
     end
     return nothing
 end
@@ -149,8 +241,11 @@ function _validate_rrqr_metadata(F, op::AbstractString)
     if tp !== nothing && tp != F.precision_bits
         throw(PrecisionMismatch(F.precision_bits, tp, nothing))
     end
-    # Rank-policy scalars must be finite and non-negative.
+    # Rank-policy scalars must be finite, non-negative, and carry the factor
+    # precision. A finite-but-wrong-precision scalar is still a malformed
+    # factor and must be rejected.
     for (name, value) in (
+        (:tolerance, F.tolerance),
         (:atol, F.atol),
         (:rtol, F.rtol),
         (:reference_scale, F.reference_scale),
@@ -162,6 +257,30 @@ function _validate_rrqr_metadata(F, op::AbstractString)
         value >= 0 || throw(ArgumentError(
             "$op: RRQR $name must be non-negative",
         ))
+        precision(value) == F.precision_bits || throw(PrecisionMismatch(
+            F.precision_bits, precision(value), nothing,
+        ))
     end
+    # Rank-policy semantic consistency: the stored scalars must agree with the
+    # rank policy that produced them, and the stored rank must agree with the
+    # factor diagonal under the stored effective threshold. This rejects
+    # in-range-but-wrong corruption (e.g. rank=0, a slightly shifted threshold,
+    # or a tolerance that no longer equals atol) that a pure range check would
+    # accept.
+    F.tolerance == F.atol || throw(ArgumentError(
+        "$op: RRQR tolerance must equal atol",
+    ))
+    expected = BigFloat(0; precision = F.precision_bits)
+    MA.operate_to!(expected, *, F.rtol, F.reference_scale)
+    expected > F.atol || MA.operate_to!(expected, copy, F.atol)
+    F.effective_threshold == expected || throw(ArgumentError(
+        "$op: RRQR effective_threshold is inconsistent with the rank policy " *
+        "(expected max(atol, rtol*reference_scale) = $expected)",
+    ))
+    recomputed = _qr_rank_from_factors(F.factors, F.effective_threshold)
+    F.rank == recomputed || throw(ArgumentError(
+        "$op: RRQR rank $(F.rank) is inconsistent with the factor diagonal " *
+        "under effective_threshold (recomputed $recomputed)",
+    ))
     return nothing
 end

@@ -83,14 +83,20 @@ issuccess(F::BFLAQRFactor) = F.status.kind === :success
 
 Numerical rank of the factorization.
 """
-factor_rank(F::BFLAQRFactor) = F.rank
+function factor_rank(F::BFLAQRFactor)
+    _validate_factor_integrity!(F, "factor_rank")
+    return F.rank
+end
 
 """
     factor_jpvt(F) -> Vector{Int}
 
 Column permutation (`A * P = Q * R`).
 """
-factor_jpvt(F::BFLAQRFactor) = copy(F.jpvt)
+function factor_jpvt(F::BFLAQRFactor)
+    _validate_factor_integrity!(F, "factor_jpvt")
+    return copy(F.jpvt)
+end
 
 """
     factor_Rdiag(F) -> Vector{BigFloat}
@@ -98,6 +104,7 @@ factor_jpvt(F::BFLAQRFactor) = copy(F.jpvt)
 Diagonal entries of the `R` factor, in pivot order.
 """
 function factor_Rdiag(F::BFLAQRFactor)
+    _validate_factor_integrity!(F, "factor_Rdiag")
     return [
         MA.mutable_copy(F.factors[i, i])
         for i in 1:min(size(F.factors, 1), size(F.factors, 2))
@@ -110,7 +117,10 @@ end
 The absolute RRQR rank tolerance (the 0.1.0 spelling; alias of
 [`factor_rank_atol`](@ref)).
 """
-factor_tolerance(F::BFLAQRFactor) = MA.mutable_copy(F.tolerance)
+function factor_tolerance(F::BFLAQRFactor)
+    _validate_factor_integrity!(F, "factor_tolerance")
+    return MA.mutable_copy(F.tolerance)
+end
 
 """
     factor_rank_atol(F) -> BigFloat
@@ -118,7 +128,10 @@ factor_tolerance(F::BFLAQRFactor) = MA.mutable_copy(F.tolerance)
 Return the absolute component of the RRQR numerical-rank policy.  The result
 is a defensive copy.
 """
-factor_rank_atol(F::BFLAQRFactor) = MA.mutable_copy(F.atol)
+function factor_rank_atol(F::BFLAQRFactor)
+    _validate_factor_integrity!(F, "factor_rank_atol")
+    return MA.mutable_copy(F.atol)
+end
 
 """
     factor_rank_rtol(F) -> BigFloat
@@ -126,7 +139,10 @@ factor_rank_atol(F::BFLAQRFactor) = MA.mutable_copy(F.atol)
 Return the relative component of the RRQR numerical-rank policy.  The result
 is a defensive copy.
 """
-factor_rank_rtol(F::BFLAQRFactor) = MA.mutable_copy(F.rtol)
+function factor_rank_rtol(F::BFLAQRFactor)
+    _validate_factor_integrity!(F, "factor_rank_rtol")
+    return MA.mutable_copy(F.rtol)
+end
 
 """
     factor_rank_scale(F) -> BigFloat
@@ -135,7 +151,10 @@ Return the scale used as the reference for the relative rank threshold.  For
 RRQR this is the largest input-column 2-norm, computed before the packed
 factor storage is overwritten.  The result is a defensive copy.
 """
-factor_rank_scale(F::BFLAQRFactor) = MA.mutable_copy(F.reference_scale)
+function factor_rank_scale(F::BFLAQRFactor)
+    _validate_factor_integrity!(F, "factor_rank_scale")
+    return MA.mutable_copy(F.reference_scale)
+end
 
 """
     factor_rank_threshold(F) -> BigFloat
@@ -143,7 +162,10 @@ factor_rank_scale(F::BFLAQRFactor) = MA.mutable_copy(F.reference_scale)
     Return `max(atol, rtol * reference_scale)`, the threshold used by the stored
 RRQR rank decision.  The result is a defensive copy.
 """
-factor_rank_threshold(F::BFLAQRFactor) = MA.mutable_copy(F.effective_threshold)
+function factor_rank_threshold(F::BFLAQRFactor)
+    _validate_factor_integrity!(F, "factor_rank_threshold")
+    return MA.mutable_copy(F.effective_threshold)
+end
 
 """
     factor_diagnostics(F::BFLAQRFactor) -> NamedTuple
@@ -152,14 +174,7 @@ Return RRQR rank-policy metadata.  Mutable numeric values and the pivot vector
 are copied so inspecting diagnostics cannot mutate the factor.
 """
 function factor_diagnostics(F::BFLAQRFactor)
-    _validate_factor_precision(F, "factor_diagnostics")
-    _validate_factor_metadata(F, "factor_diagnostics")
-    (_all_finite(F.factors) && _all_finite(F.tau) &&
-     isfinite(F.tolerance) && isfinite(F.atol) && isfinite(F.rtol) &&
-     isfinite(F.reference_scale) && isfinite(F.effective_threshold)) ||
-        throw(DomainError(
-            F, "factor_diagnostics: RRQR storage contains non-finite entries",
-        ))
+    _validate_factor_integrity!(F, "factor_diagnostics")
     diagonal = factor_Rdiag(F)
     minimum_accepted = nothing
     absolute = BigFloat(0; precision = F.precision_bits)
@@ -324,19 +339,15 @@ function numerical_rank(
     atol::Union{Nothing,BigFloat}=nothing,
     rtol::Union{Nothing,BigFloat}=nothing,
 )
-    _validate_factor_precision(
-        F,
-        "numerical_rank",
-        atol,
-        rtol,
-    )
+    _validate_factor_integrity!(F, "numerical_rank")
     issuccess(F) || throw(ArgumentError(
         "numerical_rank: factor status is not successful",
     ))
-    (_all_finite(F.factors) && _all_finite(F.tau) &&
-     isfinite(F.tolerance) && isfinite(F.atol) && isfinite(F.rtol) &&
-     isfinite(F.reference_scale) && isfinite(F.effective_threshold)) ||
-        throw(DomainError(F, "numerical_rank: factor storage contains non-finite entries"))
+    # The keyword tolerances, when provided, must carry the factor precision.
+    kp = _check_precision(atol, rtol)
+    if kp !== nothing && kp != F.precision_bits
+        throw(PrecisionMismatch(F.precision_bits, kp, nothing))
+    end
     a = atol === nothing ? F.atol : MA.mutable_copy(atol)
     r = rtol === nothing ? F.rtol : MA.mutable_copy(rtol)
     _qr_validate_tolerance(a, "atol", "numerical_rank")
@@ -533,14 +544,8 @@ function _qr_ldiv!(
     if trusted
         _validate_trusted_rhs_precision(F, operation, rhs)
     else
-        _validate_factor_precision(F, operation, rhs)
-        _validate_factor_metadata(F, operation)
-        (_all_finite(F.factors) && _all_finite(F.tau) &&
-         isfinite(F.tolerance) && isfinite(F.atol) && isfinite(F.rtol) &&
-         isfinite(F.reference_scale) && isfinite(F.effective_threshold)) ||
-            throw(DomainError(
-            F, "$operation: factor storage contains non-finite entries",
-        ))
+        _validate_factor_integrity!(F, operation)
+        _validate_rhs_precision(F, operation, rhs)
     end
     _all_finite(rhs) || throw(DomainError(
         rhs, "$operation: right-hand side contains non-finite entries",

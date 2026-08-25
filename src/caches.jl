@@ -80,6 +80,25 @@ function _cache_require_success(cache::AbstractFactorCache, op::AbstractString)
     return nothing
 end
 
+"""
+    _validate_cache_prepare(n, precision_bits, nrhs, workspace_workers)
+
+Unified preflight for every cache's `prepare!`. All checks run before any cache
+field is mutated, so a failed `prepare!` leaves the cache in its previous state.
+"""
+function _validate_cache_prepare(
+    n::Int,
+    precision_bits::Int,
+    nrhs::Int,
+    workspace_workers::Int,
+)
+    n >= 0 || throw(ArgumentError("prepare!: n must be non-negative"))
+    precision_bits > 0 || throw(ArgumentError("prepare!: precision_bits must be positive"))
+    nrhs >= 1 || throw(ArgumentError("prepare!: nrhs must be positive"))
+    workspace_workers >= 1 || throw(ArgumentError("prepare!: workspace_workers must be positive"))
+    return nothing
+end
+
 # --- checked factor-integrity contract --------------------------------------
 
 # The checked solve/refine paths re-validate the cache's owned factor storage
@@ -97,18 +116,26 @@ by the checked [`solve!`](@ref) and [`refine_once!`](@ref); the trusted paths
 skip this scan because their caller guarantees the factor is unchanged.
 """
 function _validate_cache_factor!(cache::AbstractFactorCache, op::AbstractString)
-    actual = _require_precision(_check_precision(cache.factors), op)
-    actual == cache.precision_bits || throw(PrecisionMismatch(
-        cache.precision_bits, actual, nothing,
-    ))
-    _cache_factor_storage_finite(cache) || throw(DomainError(
-        cache.factors, "$op: factor storage contains non-finite entries",
-    ))
-    # Reuse the same metadata rules as the ordinary allocating factors so the
-    # two code paths cannot drift.
-    _validate_factor_metadata(cache, op)
-    return nothing
+    return _validate_factor_integrity!(cache, op)
 end
+
+# Cache-specific shape rule: the owned factor storage must match the order
+# reserved by `prepare!`. This is checked before any `@inbounds` kernel runs, so
+# a caller that replaced `cache.factors` with a wrong-size matrix fails closed
+# with a clear error instead of a `BoundsError` or silent wrong result.
+function _validate_factor_shape(cache::AbstractFactorCache, op::AbstractString)
+    size(cache.factors) == (cache.n, cache.n) || throw(DimensionMismatch(
+        "$op: cache factor storage size $(size(cache.factors)) does not match " *
+        "the reserved cache order $(cache.n)x$(cache.n)",
+    ))
+    return _validate_factor_shape_impl(cache, op)
+end
+
+# Caches mirror the factor field names, so the shared storage-precision check
+# (`_validate_factor_storage_precision`) can scan the same operands. The RRQR
+# cache additionally carries `tau` and the rank-policy scalars; its
+# `_factor_precision_operands` override is defined after the struct.
+_factor_precision_operands(::AbstractFactorCache) = ()
 
 function _require_cache_matrix(cache, A::AbstractMatrix{BigFloat}, op::AbstractString)
     n = cache.n
@@ -316,7 +343,8 @@ factor_matrix(cache::BFLACholeskyCache) = cache.factors
              workspace_workers=1)
 
 Reserve `n × n` factor storage and scalar/workspace scratch at
-`precision_bits`. The only allocating entry point.
+`precision_bits`. `prepare!` and `prepare_refinement!` are the allocation entry
+points; changing the size or precision is an explicit preparation act.
 """
 function prepare!(
     cache::BFLACholeskyCache,
@@ -325,10 +353,7 @@ function prepare!(
     nrhs::Int=1,
     workspace_workers::Int=1,
 )
-    n >= 0 || throw(ArgumentError("prepare!: n must be non-negative"))
-    precision_bits > 0 || throw(ArgumentError("prepare!: precision_bits must be positive"))
-    nrhs >= 1 || throw(ArgumentError("prepare!: nrhs must be positive"))
-    workspace_workers >= 1 || throw(ArgumentError("prepare!: workspace_workers must be positive"))
+    _validate_cache_prepare(n, precision_bits, nrhs, workspace_workers)
     cache.factors = owned_zeros(BigFloat, n, n; precision_bits = precision_bits)
     cache.precision_bits = precision_bits
     cache.n = n
@@ -502,9 +527,8 @@ function solve(
     cache::BFLACholeskyCache,
     b::AbstractVecOrMat{BigFloat},
 )
-    _cache_require_success(cache, "solve")
     x = owned_zeros(BigFloat, size(b)...; precision_bits = cache.precision_bits)
-    return solve_trusted!(x, cache, b)
+    return _solve_owned_checked!(x, cache, b, "solve")
 end
 
 # Select the embedded workspace for a cache solve. The cache owns a worker-local
@@ -613,6 +637,38 @@ end
     return nothing
 end
 
+# Checked, ownership-safe solve for the allocating `solve(cache, b)` entry.
+# `x` is a freshly-owned destination at the factor precision (created by the
+# caller, e.g. `owned_zeros`), so it is *not* re-owned here. Unlike the old
+# `solve_trusted!`-based path, this validates the factor's shape, storage
+# precision/finiteness, and metadata before solving, so a caller that mutated
+# `cache.factors` or the metadata fails closed instead of silently producing a
+# wrong result or entering an `@inbounds` kernel with a malformed factor.
+function _solve_owned_checked!(
+    x::AbstractVecOrMat{BigFloat},
+    cache::AbstractFactorCache,
+    b::AbstractVecOrMat{BigFloat},
+    op::AbstractString,
+)
+    _cache_require_success(cache, op)
+    _validate_cache_factor!(cache, op)
+    (size(x, 1) == cache.n && size(b, 1) == cache.n) || throw(DimensionMismatch(
+        "$op: cache, solution and right-hand side dimensions differ",
+    ))
+    _require_cache_rhs(cache, b, op)
+    _all_finite(b) || throw(DomainError(
+        b, "$op: right-hand side contains non-finite entries",
+    ))
+    _require_no_alias(x, cache.factors, op)
+    Base.mightalias(x, b) && throw(ArgumentError(
+        "$op: solution must not alias the right-hand side",
+    ))
+    _cache_rhs_write!(x, b, op)
+    _cache_solve_inplace!(cache, x)
+    _cache_check_solve_result!(x, op)
+    return x
+end
+
 # --- LU --------------------------------------------------------------------
 
 """
@@ -647,10 +703,12 @@ factor_kind(::BFLALUCache) = :lu
 factor_matrix(cache::BFLALUCache) = cache.factors
 function factor_pivots(cache::BFLALUCache)
     _cache_require_success(cache, "factor_pivots")
+    _validate_cache_factor!(cache, "factor_pivots")
     return copy(cache.pivots)
 end
 function factor_perm(cache::BFLALUCache)
     _cache_require_success(cache, "factor_perm")
+    _validate_cache_factor!(cache, "factor_perm")
     return copy(cache.perm)
 end
 
@@ -661,8 +719,7 @@ function prepare!(
     nrhs::Int=1,
     workspace_workers::Int=1,
 )
-    n >= 0 || throw(ArgumentError("prepare!: n must be non-negative"))
-    precision_bits > 0 || throw(ArgumentError("prepare!: precision_bits must be positive"))
+    _validate_cache_prepare(n, precision_bits, nrhs, workspace_workers)
     cache.factors = owned_zeros(BigFloat, n, n; precision_bits = precision_bits)
     cache.precision_bits = precision_bits
     cache.n = n
@@ -833,9 +890,8 @@ function solve(
     cache::BFLALUCache,
     b::AbstractVecOrMat{BigFloat},
 )
-    _cache_require_success(cache, "solve")
     x = owned_zeros(BigFloat, size(b)...; precision_bits = cache.precision_bits)
-    return solve_trusted!(x, cache, b)
+    return _solve_owned_checked!(x, cache, b, "solve")
 end
 
 # --- LDLT (Bunch-Kaufman) --------------------------------------------------
@@ -875,10 +931,12 @@ factor_triangle(::BFLALDLTCache) = Lower
 factor_matrix(cache::BFLALDLTCache) = cache.factors
 function factor_perm(cache::BFLALDLTCache)
     _cache_require_success(cache, "factor_perm")
+    _validate_cache_factor!(cache, "factor_perm")
     return copy(cache.perm)
 end
 function factor_blocks(cache::BFLALDLTCache)
     _cache_require_success(cache, "factor_blocks")
+    _validate_cache_factor!(cache, "factor_blocks")
     return copy(cache.blocks)
 end
 
@@ -890,7 +948,7 @@ valid after a successful `factorize!`.
 """
 function factor_inertia(cache::BFLALDLTCache)
     _cache_require_success(cache, "factor_inertia")
-    _validate_factor_metadata(cache, "factor_inertia")
+    _validate_cache_factor!(cache, "factor_inertia")
     return _factor_inertia_unchecked(cache)
 end
 
@@ -901,8 +959,7 @@ function prepare!(
     nrhs::Int=1,
     workspace_workers::Int=1,
 )
-    n >= 0 || throw(ArgumentError("prepare!: n must be non-negative"))
-    precision_bits > 0 || throw(ArgumentError("prepare!: precision_bits must be positive"))
+    _validate_cache_prepare(n, precision_bits, nrhs, workspace_workers)
     cache.factors = owned_zeros(BigFloat, n, n; precision_bits = precision_bits)
     cache.precision_bits = precision_bits
     cache.n = n
@@ -1007,9 +1064,8 @@ function solve(
     cache::BFLALDLTCache,
     b::AbstractVecOrMat{BigFloat},
 )
-    _cache_require_success(cache, "solve")
     x = owned_zeros(BigFloat, size(b)...; precision_bits = cache.precision_bits)
-    return solve_trusted!(x, cache, b)
+    return _solve_owned_checked!(x, cache, b, "solve")
 end
 
 # --- RRQR ----------------------------------------------------------------
@@ -1063,15 +1119,18 @@ factor_kind(::BFLARRQRCache) = :rrqr
 factor_matrix(cache::BFLARRQRCache) = cache.factors
 function factor_jpvt(cache::BFLARRQRCache)
     _cache_require_success(cache, "factor_jpvt")
+    _validate_cache_factor!(cache, "factor_jpvt")
     return copy(cache.jpvt)
 end
 function factor_rank(cache::BFLARRQRCache)
     _cache_require_success(cache, "factor_rank")
+    _validate_cache_factor!(cache, "factor_rank")
     return cache.rank
 end
 
 function factor_Rdiag(cache::BFLARRQRCache)
     _cache_require_success(cache, "factor_Rdiag")
+    _validate_cache_factor!(cache, "factor_Rdiag")
     n = cache.n
     Rdiag = BigFloat[]
     p = cache.precision_bits
@@ -1083,18 +1142,22 @@ end
 
 function factor_rank_atol(cache::BFLARRQRCache)
     _cache_require_success(cache, "factor_rank_atol")
+    _validate_cache_factor!(cache, "factor_rank_atol")
     return MA.mutable_copy(cache.atol)
 end
 function factor_rank_rtol(cache::BFLARRQRCache)
     _cache_require_success(cache, "factor_rank_rtol")
+    _validate_cache_factor!(cache, "factor_rank_rtol")
     return MA.mutable_copy(cache.rtol)
 end
 function factor_rank_scale(cache::BFLARRQRCache)
     _cache_require_success(cache, "factor_rank_scale")
+    _validate_cache_factor!(cache, "factor_rank_scale")
     return MA.mutable_copy(cache.reference_scale)
 end
 function factor_rank_threshold(cache::BFLARRQRCache)
     _cache_require_success(cache, "factor_rank_threshold")
+    _validate_cache_factor!(cache, "factor_rank_threshold")
     return MA.mutable_copy(cache.effective_threshold)
 end
 
@@ -1105,8 +1168,7 @@ function prepare!(
     nrhs::Int=1,
     workspace_workers::Int=1,
 )
-    n >= 0 || throw(ArgumentError("prepare!: n must be non-negative"))
-    precision_bits > 0 || throw(ArgumentError("prepare!: precision_bits must be positive"))
+    _validate_cache_prepare(n, precision_bits, nrhs, workspace_workers)
     cache.factors = owned_zeros(BigFloat, n, n; precision_bits = precision_bits)
     cache.precision_bits = precision_bits
     cache.n = n
@@ -1143,6 +1205,14 @@ function factorize!(
 )
     _cache_require_prepared(cache, "factorize!")
     _require_cache_matrix(cache, A, "factorize!")
+    # Precision preflight: the coefficient matrix and every rank-policy scalar
+    # must carry the cache precision. This runs before any cache field is
+    # mutated, so a mismatch preserves the previous (possibly successful)
+    # factor.
+    p = _require_precision(_check_precision(A, tol, atol, rtol), "factorize!")
+    p == cache.precision_bits || throw(PrecisionMismatch(
+        cache.precision_bits, p, nothing,
+    ))
     # Rank-policy preflight (does not mutate factor storage).
     absolute, relative, scale, threshold = _qr_rank_policy(
         A, cache.precision_bits, tol, atol, rtol, "factorize!",
@@ -1218,15 +1288,15 @@ function solve(
     cache::BFLARRQRCache,
     b::AbstractVecOrMat{BigFloat},
 )
-    _cache_require_success(cache, "solve")
     x = owned_zeros(BigFloat, size(b)...; precision_bits = cache.precision_bits)
-    return solve_trusted!(x, cache, b)
+    return _solve_owned_checked!(x, cache, b, "solve")
 end
 
 # --- factor_diagnostics ---------------------------------------------------
 
 function factor_diagnostics(cache::BFLACholeskyCache)
     _cache_require_success(cache, "factor_diagnostics")
+    _validate_cache_factor!(cache, "factor_diagnostics")
     return (
         factor_kind = factor_kind(cache),
         triangle = factor_triangle(cache),
@@ -1236,7 +1306,7 @@ end
 
 function factor_diagnostics(cache::BFLALUCache)
     _cache_require_success(cache, "factor_diagnostics")
-    _validate_factor_metadata(cache, "factor_diagnostics")
+    _validate_cache_factor!(cache, "factor_diagnostics")
     return (
         factor_kind = factor_kind(cache),
         row_swap_count = count(k -> cache.pivots[k] != k, eachindex(cache.pivots)),
@@ -1247,7 +1317,7 @@ end
 
 function factor_diagnostics(cache::BFLALDLTCache)
     _cache_require_success(cache, "factor_diagnostics")
-    _validate_factor_metadata(cache, "factor_diagnostics")
+    _validate_cache_factor!(cache, "factor_diagnostics")
     inertia = _factor_inertia_unchecked(cache)
     return (
         factor_kind = factor_kind(cache),
@@ -1260,7 +1330,7 @@ end
 
 function factor_diagnostics(cache::BFLARRQRCache)
     _cache_require_success(cache, "factor_diagnostics")
-    _validate_factor_metadata(cache, "factor_diagnostics")
+    _validate_cache_factor!(cache, "factor_diagnostics")
     return (
         factor_kind = factor_kind(cache),
         rank = cache.rank,
@@ -1444,16 +1514,13 @@ function _cache_solve_inplace!(cache::BFLARRQRCache, x::AbstractVecOrMat{BigFloa
     return x
 end
 
-
-function _cache_factor_storage_finite(cache::BFLACholeskyCache)
-    return _triangle_finite(cache.factors, cache.triangle)
-end
-function _cache_factor_storage_finite(cache::BFLALUCache)
-    return _all_finite(cache.factors)
-end
-function _cache_factor_storage_finite(cache::BFLALDLTCache)
-    return _triangle_finite(cache.factors, Lower)
-end
-function _cache_factor_storage_finite(cache::BFLARRQRCache)
-    return _all_finite(cache.factors) && _all_finite(cache.tau)
-end
+# The RRQR cache carries `tau` and the rank-policy scalars in addition to the
+# factor matrix, so the shared storage-precision check scans them too.
+_factor_precision_operands(cache::BFLARRQRCache) = (
+    cache.tau,
+    cache.tolerance,
+    cache.atol,
+    cache.rtol,
+    cache.reference_scale,
+    cache.effective_threshold,
+)

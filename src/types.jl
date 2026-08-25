@@ -345,12 +345,7 @@ issuccess(F::BFLACholeskyFactor) = F.status.kind === :success
 end
 
 function _cholesky_diagonal_diagnostics(F::BFLACholeskyFactor)
-    _validate_factor_precision(F, "factor_diagnostics")
-    _triangle_finite(F.factors, F.triangle) || throw(DomainError(
-        F.factors,
-        "factor_diagnostics: authoritative Cholesky triangle contains " *
-        "non-finite entries",
-    ))
+    _validate_factor_integrity!(F, "factor_diagnostics")
     n = size(F.factors, 1)
     n == 0 && return (nothing, nothing, nothing)
     p = F.precision_bits

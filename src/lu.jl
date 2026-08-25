@@ -30,7 +30,10 @@ factor_precision(F::BFLALUFactor) = F.precision_bits
 factor_status(F::BFLALUFactor) = F.status
 factor_kind(::BFLALUFactor) = :lu
 factor_triangle(::BFLALUFactor) = nothing
-factor_perm(F::BFLALUFactor) = copy(F.perm)
+function factor_perm(F::BFLALUFactor)
+    _validate_factor_integrity!(F, "factor_perm")
+    return copy(F.perm)
+end
 issuccess(F::BFLALUFactor) = F.status.kind === :success
 
 """
@@ -39,7 +42,10 @@ issuccess(F::BFLALUFactor) = F.status.kind === :success
 Partial-pivot row swaps. At elimination step `k`, rows `k` and
 `factor_pivots(F)[k]` were exchanged.
 """
-factor_pivots(F::BFLALUFactor) = copy(F.pivots)
+function factor_pivots(F::BFLALUFactor)
+    _validate_factor_integrity!(F, "factor_pivots")
+    return copy(F.pivots)
+end
 
 """
     factor_diagnostics(F::BFLALUFactor) -> NamedTuple
@@ -48,7 +54,7 @@ Report row-swap count, final permutation, and optional failure position.
 These are numerical facts only; no fallback policy is implied.
 """
 function factor_diagnostics(F::BFLALUFactor)
-    _validate_factor_metadata(F, "factor_diagnostics")
+    _validate_factor_integrity!(F, "factor_diagnostics")
     return (
         factor_kind = factor_kind(F),
         row_swap_count = count(k -> F.pivots[k] != k, eachindex(F.pivots)),
@@ -174,11 +180,8 @@ function _lu_ldiv!(
     if trusted
         _validate_trusted_rhs_precision(F, operation, rhs)
     else
-        _validate_factor_precision(F, operation, rhs)
-        _validate_factor_metadata(F, operation)
-        _all_finite(F.factors) || throw(DomainError(
-            F, "$operation: factor storage contains non-finite entries",
-        ))
+        _validate_factor_integrity!(F, operation)
+        _validate_rhs_precision(F, operation, rhs)
     end
     _all_finite(rhs) || throw(DomainError(
         rhs, "$operation: right-hand side contains non-finite entries",

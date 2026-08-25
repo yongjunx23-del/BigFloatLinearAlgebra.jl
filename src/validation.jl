@@ -84,6 +84,17 @@ function _validate_trusted_rhs_precision(
     operation::AbstractString,
     rhs::AbstractVecOrMat{BigFloat},
 )
+    return _validate_rhs_precision(F, operation, rhs)
+end
+
+# Check that the RHS carries the factor's recorded precision. Used by the
+# checked solve paths after `_validate_factor_integrity!` has validated the
+# factor storage (so the RHS is the only remaining caller-owned mutable input).
+function _validate_rhs_precision(
+    F,
+    operation::AbstractString,
+    rhs::AbstractVecOrMat{BigFloat},
+)
     recorded = factor_precision(F)
     isempty(rhs) && return recorded
     actual = _require_precision(_check_precision(rhs), operation)

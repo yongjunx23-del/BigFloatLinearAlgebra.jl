@@ -3,6 +3,51 @@
 All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.2.1] - 2026-08-25
+
+### Added
+
+- A single checked factor-integrity entry, `_validate_factor_integrity!`, that
+  validates factor **shape** (square for Cholesky/LU/LDLT, `m×n` for RRQR, and
+  `size(cache.factors) == (cache.n, cache.n)` for a cache), factor storage
+  **precision**, factor storage **finiteness**, and **metadata** consistency. It
+  is wired into the ordinary checked `ldiv!`/`solve!`, the cache checked
+  `solve!`/`refine_once!`, `factor_diagnostics`, `factor_inertia`,
+  `numerical_rank`, and every metadata accessor that reads factor internals.
+  The trusted paths (`ldiv_trusted!`, `solve_trusted!`, `refine_once_trusted!`)
+  still skip the factor rescan.
+- The allocating `solve(cache, b)` now goes through a checked
+  `_solve_owned_checked!` entry that validates factor shape/storage/metadata and
+  RHS finiteness before solving, instead of calling `solve_trusted!` and
+  skipping factor-integrity validation.
+- RRQR rank-policy **semantic consistency**: the checked validator now rejects
+  in-range-but-wrong corruption (rank, effective threshold, reference scale,
+  tolerance-vs-atol, or a rank-policy scalar at the wrong precision) that a pure
+  range check would accept. `BFLARRQRCache.factorize!` also preflights the
+  precision of `A`, `tol`, `atol`, and `rtol` against the cache precision before
+  mutating any cache field.
+- A unified `_validate_cache_prepare` preflight for every cache's `prepare!`
+  (non-negative `n`, positive `precision_bits`, `nrhs >= 1`,
+  `workspace_workers >= 1`), run before any cache field is mutated so a failed
+  `prepare!` leaves the cache unchanged.
+- Adversarial shape and semantic fuzz suites with a residual/backward-error
+  gate: a checked operation that succeeds must produce a small residual, never a
+  silent wrong result.
+
+### Changed
+
+- Metadata accessors that read factor internals (`factor_perm`, `factor_pivots`,
+  `factor_blocks`, `factor_inertia`, `factor_rank`, `factor_jpvt`,
+  `factor_Rdiag`, `factor_rank_atol/rtol/scale/threshold`, `factor_diagnostics`,
+  `numerical_rank`) now validate the factor before returning a value, so a caller
+  cannot get a plausible-looking value from a factor whose metadata was
+  externally mutated. Status/backend/precision/kind accessors need no
+  validation.
+- Corrected stale documentation: `prepare!` is no longer described as "the only
+  allocating entry point" (`prepare_refinement!` is also one), and the
+  `BigFloatLU`/`BigFloatCholesky` docstrings no longer claim the factor owns a
+  "deep matrix copy".
+
 ## [0.2.0] - 2026-08-25
 
 ### Added
@@ -38,9 +83,6 @@ All notable changes to this project are documented here. The format is based on
   via `prepare_refinement!`; `invalidate!` preserves reusable refinement
   storage; the cache `refine_once!` no longer accepts a silently-ignored
   `residual_precision` keyword (cache refinement is factor-precision-only).
-
-### Changed (follow-up)
-
 - Unified factor-integrity validation (`_validate_factor_shape` /
   `_validate_factor_metadata`) shared by the ordinary allocating factors and the
   reusable caches: LU pivot step range + permutation consistency, LDLT
@@ -54,16 +96,6 @@ All notable changes to this project are documented here. The format is based on
   exception; failure/recovery is explicit.
 - Cache solve finite semantics: checked and trusted solves reject a non-finite
   RHS and a non-finite solve result (pure scans, no Julia allocation).
-- Malformed-factor fuzz test suite (no crash / no out-of-bounds on corrupted
-  metadata).
-
-- Added the checked factor-integrity contract: `solve!(x, cache, b)` and
-  `refine_once!(cache, A, x, b)` re-validate the owned factor storage precision,
-  finiteness, and metadata consistency on every call (mirroring the ordinary
-  factor `ldiv!`/`ldiv_trusted!` split), while the trusted paths skip the
-  rescan. LU and RRQR metadata checks also validate pivot/jpvt/permutation value
-  ranges, preventing a memory-safety fault on out-of-range pivots.
-
 - Added `refine_once_trusted!` (solver-facing) alongside the checked
   `refine_once!`; both reject solution aliasing against the factor and the RHS,
   and the checked path re-owns a shared/ambient-precision destination safely.
@@ -84,7 +116,8 @@ All notable changes to this project are documented here. The format is based on
   error on use-before-prepare, precision, or shape mismatch (no silent resize).
 - A canonical `docs/src/reference.md` API reference (via `@autodocs`) documents
   every exported binding; `makedocs(checkdocs = :exports)` enforces it.
-
+- Malformed-factor fuzz test suite (no crash / no out-of-bounds on corrupted
+  metadata).
 
 ### Known limitations
 
