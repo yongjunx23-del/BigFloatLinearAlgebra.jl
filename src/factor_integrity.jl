@@ -148,6 +148,19 @@ function _validate_factor_metadata(F, op::AbstractString)
 end
 
 function _validate_cholesky_metadata(F, op::AbstractString)
+    # A successful Cholesky factor must have a strictly positive diagonal. A
+    # caller that mutates a diagonal element to a non-positive value (while
+    # keeping the shape, precision, and finiteness intact) would otherwise pass
+    # the shape/precision/finiteness checks and silently produce a wrong solve.
+    # This is only reached for a `:success` factor (the checked solve and
+    # diagnostics gate on `issuccess` first), so a genuinely non-positive-
+    # definite factor is not misreported.
+    A = factor_matrix(F)
+    @inbounds for i in axes(A, 1)
+        A[i, i] > 0 || throw(ArgumentError(
+            "$op: successful Cholesky factor must have a positive diagonal",
+        ))
+    end
     return nothing
 end
 

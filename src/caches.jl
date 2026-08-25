@@ -507,7 +507,7 @@ function solve_trusted!(
     b::AbstractVecOrMat{BigFloat},
 )
     _cache_trusted_solve_check!(x, cache, b, "solve_trusted!")
-    _cache_rhs_write!(x, b, "solve_trusted!")
+    _cache_rhs_write!(x, b, cache.precision_bits, "solve_trusted!")
     workspace, worker = _cache_solve_workspace(cache, 1)
     _cholesky_solve!(
         cache.backend, cache.factors, cache.triangle, cache.precision_bits,
@@ -569,10 +569,15 @@ end
 # Trusted solve: copy the RHS into an already-owned, precision-consistent
 # destination by writing into the existing BigFloat objects (no replacement, no
 # ownership scan). The caller must guarantee the destination is independently
-# owned at the factor precision (e.g. from `owned_zeros`).
+# owned at the factor precision (e.g. from `owned_zeros`). Both the source and
+# the destination must carry the cache's factor precision; a mismatch throws
+# `PrecisionMismatch` (mirroring the ordinary `ldiv_trusted!` contract). The
+# precision scan is the same one the function already performed, so this adds no
+# extra array scan and no Julia allocation to the zero-allocation trusted gate.
 function _cache_rhs_write!(
     destination::AbstractArray{BigFloat},
     source::AbstractArray{BigFloat},
+    expected_precision::Int,
     op::AbstractString,
 )
     axes(destination) == axes(source) || throw(DimensionMismatch(
@@ -583,7 +588,8 @@ function _cache_rhs_write!(
     ))
     p = _require_precision(_check_precision(source), op)
     dp = _require_precision(_check_precision(destination), op)
-    p == dp || throw(PrecisionMismatch(dp, p, nothing))
+    p == expected_precision || throw(PrecisionMismatch(expected_precision, p, nothing))
+    dp == expected_precision || throw(PrecisionMismatch(expected_precision, dp, nothing))
     @inbounds for index in eachindex(destination, source)
         MA.operate_to!(destination[index], copy, source[index])
     end
@@ -663,7 +669,7 @@ function _solve_owned_checked!(
     Base.mightalias(x, b) && throw(ArgumentError(
         "$op: solution must not alias the right-hand side",
     ))
-    _cache_rhs_write!(x, b, op)
+    _cache_rhs_write!(x, b, cache.precision_bits, op)
     _cache_solve_inplace!(cache, x)
     _cache_check_solve_result!(x, op)
     return x
@@ -876,7 +882,7 @@ function solve_trusted!(
     b::AbstractVecOrMat{BigFloat},
 )
     _cache_trusted_solve_check!(x, cache, b, "solve_trusted!")
-    _cache_rhs_write!(x, b, "solve_trusted!")
+    _cache_rhs_write!(x, b, cache.precision_bits, "solve_trusted!")
     workspace, worker = _cache_solve_workspace(cache, 1)
     _lu_solve!(
         cache.backend, cache.factors, cache.pivots, cache.precision_bits,
@@ -1053,7 +1059,7 @@ function solve_trusted!(
     b::AbstractVecOrMat{BigFloat},
 )
     _cache_trusted_solve_check!(x, cache, b, "solve_trusted!")
-    _cache_rhs_write!(x, b, "solve_trusted!")
+    _cache_rhs_write!(x, b, cache.precision_bits, "solve_trusted!")
     workspace, worker = _cache_solve_workspace(cache, 1)
     _ldlt_solve!(cache.backend, cache, x, workspace, worker)
     _cache_check_solve_result!(x, "solve_trusted!")
@@ -1277,7 +1283,7 @@ function solve_trusted!(
     b::AbstractVecOrMat{BigFloat},
 )
     _cache_trusted_solve_check!(x, cache, b, "solve_trusted!")
-    _cache_rhs_write!(x, b, "solve_trusted!")
+    _cache_rhs_write!(x, b, cache.precision_bits, "solve_trusted!")
     workspace, worker = _cache_solve_workspace(cache, 1)
     _qr_solve!(cache.backend, cache, x, workspace, worker)
     _cache_check_solve_result!(x, "solve_trusted!")
