@@ -533,6 +533,7 @@ function _qr_ldiv!(
         _validate_trusted_rhs_precision(F, operation, rhs)
     else
         _validate_factor_precision(F, operation, rhs)
+        _validate_factor_metadata(F, operation)
         (_all_finite(F.factors) && _all_finite(F.tau) &&
          isfinite(F.tolerance) && isfinite(F.atol) && isfinite(F.rtol) &&
          isfinite(F.reference_scale) && isfinite(F.effective_threshold)) ||

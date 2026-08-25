@@ -104,9 +104,9 @@ function _validate_cache_factor!(cache::AbstractFactorCache, op::AbstractString)
     _cache_factor_storage_finite(cache) || throw(DomainError(
         cache.factors, "$op: factor storage contains non-finite entries",
     ))
-    _cache_factor_metadata_valid(cache) || throw(ArgumentError(
-        "$op: factor metadata is inconsistent",
-    ))
+    # Reuse the same metadata rules as the ordinary allocating factors so the
+    # two code paths cannot drift.
+    _validate_factor_metadata(cache, op)
     return nothing
 end
 
@@ -1400,44 +1400,3 @@ end
 function _cache_factor_storage_finite(cache::BFLARRQRCache)
     return _all_finite(cache.factors) && _all_finite(cache.tau)
 end
-
-function _cache_factor_metadata_valid(cache::BFLACholeskyCache)
-    return true
-end
-function _cache_factor_metadata_valid(cache::BFLALUCache)
-    n = cache.n
-    length(cache.pivots) == n || return false
-    length(cache.perm) == n || return false
-    # Pivot values must be valid row indices in 1:n (an out-of-range pivot would
-    # otherwise corrupt memory during the solve).
-    @inbounds for k in 1:n
-        (1 <= cache.pivots[k] <= n) || return false
-    end
-    # `perm` must be a permutation of 1:n.
-    seen = falses(n)
-    @inbounds for i in 1:n
-        p = cache.perm[i]
-        (1 <= p <= n && !seen[p]) || return false
-        seen[p] = true
-    end
-    return true
-end
-function _cache_factor_metadata_valid(cache::BFLALDLTCache)
-    n = cache.n
-    sum(cache.blocks) == n || return false
-    return all(b -> b == 1 || b == 2, cache.blocks)
-end
-function _cache_factor_metadata_valid(cache::BFLARRQRCache)
-    n = cache.n
-    (0 <= cache.rank <= n) || return false
-    length(cache.jpvt) == n || return false
-    # jpvt must be a permutation of 1:n.
-    seen = falses(n)
-    @inbounds for i in 1:n
-        p = cache.jpvt[i]
-        (1 <= p <= n && !seen[p]) || return false
-        seen[p] = true
-    end
-    return true
-end
-

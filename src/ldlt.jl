@@ -463,6 +463,7 @@ function _ldlt_ldiv!(
         _validate_trusted_rhs_precision(F, operation, rhs)
     else
         _validate_factor_precision(F, operation, rhs)
+        _validate_factor_metadata(F, operation)
         _triangle_finite(F.factors, Lower) || throw(DomainError(
             F.factors,
             "$operation: authoritative factor triangle contains non-finite entries",
