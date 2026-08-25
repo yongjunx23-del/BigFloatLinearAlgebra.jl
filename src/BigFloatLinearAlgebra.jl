@@ -53,9 +53,10 @@ end
 
 Construct the optional `LinearSolve.jl` LU algorithm. Load `LinearSolve` and
 `SciMLBase` before calling this factory. The cache aliases `A` and `b`, while
-BFLA's factor owns a deep matrix copy and never modifies either input. A
-right-hand-side-only cache update reuses the factor; after mutating `A` in
-place, use `cache.A = A` or `SciMLBase.reinit!(cache; A = A)` to refactor.
+BFLA's factor owns its factor storage and copies the input into it, never
+modifying either input. A right-hand-side-only cache update reuses the factor;
+after mutating `A` in place, use `cache.A = A` or `SciMLBase.reinit!(cache; A = A)`
+to refactor.
 """
 function BigFloatLU(args...; kwargs...)
     return _linearsolve_extension().BigFloatLU(args...; kwargs...)

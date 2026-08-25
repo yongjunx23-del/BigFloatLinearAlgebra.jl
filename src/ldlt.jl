@@ -112,14 +112,20 @@ end
 Permutation of the LDLᵀ factorization; `perm[i]` is the original index at
 position `i`.
 """
-factor_perm(F::BFLALDLTFactor) = copy(F.perm)
+function factor_perm(F::BFLALDLTFactor)
+    _validate_factor_integrity!(F, "factor_perm")
+    return copy(F.perm)
+end
 
 """
     factor_blocks(F) -> Vector{Int}
 
 Pivot block sizes (1 or 2) in factorization order.
 """
-factor_blocks(F::BFLALDLTFactor) = copy(F.blocks)
+function factor_blocks(F::BFLALDLTFactor)
+    _validate_factor_integrity!(F, "factor_blocks")
+    return copy(F.blocks)
+end
 
 """
     factor_inertia(F) -> (npos, nneg, nzero)
@@ -131,15 +137,7 @@ function factor_inertia(F::BFLALDLTFactor)
     issuccess(F) || throw(ArgumentError(
         "factor_inertia: inertia is unavailable for an unsuccessful factor",
     ))
-    p_actual = _require_precision(
-        _check_precision(F.factors), "factor_inertia",
-    )
-    p_actual == F.precision_bits ||
-        throw(PrecisionMismatch(F.precision_bits, p_actual, nothing))
-    _triangle_finite(F.factors, Lower) || throw(DomainError(
-        F.factors,
-        "factor_inertia: authoritative factor triangle contains non-finite entries",
-    ))
+    _validate_factor_integrity!(F, "factor_inertia")
     return _factor_inertia_unchecked(F)
 end
 
@@ -283,13 +281,7 @@ should do with them.
 """
 function factor_diagnostics(F::BFLALDLTFactor)
     if issuccess(F)
-        _validate_factor_precision(F, "factor_diagnostics")
-        _validate_factor_metadata(F, "factor_diagnostics")
-        _triangle_finite(F.factors, Lower) || throw(DomainError(
-            F.factors,
-            "factor_diagnostics: authoritative LDLT triangle contains " *
-            "non-finite entries",
-        ))
+        _validate_factor_integrity!(F, "factor_diagnostics")
     end
     inertia = issuccess(F) ? _factor_inertia_unchecked(F) : nothing
     n1 = count(==(1), F.blocks)
@@ -463,12 +455,8 @@ function _ldlt_ldiv!(
     if trusted
         _validate_trusted_rhs_precision(F, operation, rhs)
     else
-        _validate_factor_precision(F, operation, rhs)
-        _validate_factor_metadata(F, operation)
-        _triangle_finite(F.factors, Lower) || throw(DomainError(
-            F.factors,
-            "$operation: authoritative factor triangle contains non-finite entries",
-        ))
+        _validate_factor_integrity!(F, operation)
+        _validate_rhs_precision(F, operation, rhs)
     end
     _all_finite(rhs) || throw(DomainError(
         rhs, "$operation: right-hand side contains non-finite entries",
