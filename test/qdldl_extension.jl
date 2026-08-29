@@ -1,4 +1,4 @@
-using QDLDL
+import QDLDL
 using SparseArrays
 
 function _bf_qdldl_upper(p::Int; shift="0", offdiag="0.25")
