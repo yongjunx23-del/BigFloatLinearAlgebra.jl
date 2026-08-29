@@ -114,13 +114,14 @@ end
         # Numeric mutation after factorization invalidates solve authority.
         cache.matrix.nzval[1] += BigFloat(1; precision=p)
         @test_throws ArgumentError BFLA.solve_trusted!(x, cache, b)
+        @test BFLA.factor_status(cache).kind === :unprepared
         BFLA.factorize!(cache, A2)
 
         # Internal structural mutation is detected independently of input.
         saved_row = cache.matrix.rowval[2]
         cache.matrix.rowval[2] = saved_row == 1 ? 2 : 1
         @test_throws ArgumentError BFLA.factorize!(cache, A2)
-        @test !BFLA.issuccess(cache)
+        @test BFLA.factor_status(cache).kind === :unprepared
         cache.matrix.rowval[2] = saved_row
         BFLA.factorize!(cache, A2)
 
@@ -129,21 +130,21 @@ end
             BFLA.owned_copy(A2.nzval[1:4]; precision_bits=p),
         )
         @test_throws ArgumentError BFLA.factorize!(cache, drift)
-        @test !BFLA.issuccess(cache)
+        @test BFLA.factor_status(cache).kind === :unprepared
 
         # Nonfinite/ambient preflight attempts revoke prior solve authority.
         BFLA.factorize!(cache, A2)
         bad_nonfinite = _bf_qdldl_upper(p)
         bad_nonfinite.nzval[1] = BigFloat(NaN; precision=p)
         BFLA.factorize!(cache, bad_nonfinite; check=false)
-        @test !BFLA.issuccess(cache)
+        @test BFLA.factor_status(cache).kind === :unprepared
         @test BFLA.factor_diagnostics(cache).positive_inertia == -1
         @test_throws ArgumentError BFLA.solve_trusted!(x, cache, b)
         BFLA.factorize!(cache, A2)
         setprecision(BigFloat, 64) do
             @test_throws BFLA.PrecisionMismatch BFLA.factorize!(cache, A2)
         end
-        @test !BFLA.issuccess(cache)
+        @test BFLA.factor_status(cache).kind === :unprepared
         @test BFLA.factor_diagnostics(cache).positive_inertia == -1
 
         # Actual zero-pivot failure clears stale diagnostics and solve authority.

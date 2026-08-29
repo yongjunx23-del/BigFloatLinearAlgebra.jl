@@ -204,6 +204,13 @@ function BFLA.factorize!(
     try
         _ambient_guard(cache.precision_bits, "factorize!")
         _validate_numeric(cache, A)
+    catch
+        # Rejected ambient/input/authority preflight is not a pivot failure.
+        # The attempt-entry revocation remains authoritative.
+        check && rethrow()
+        return cache
+    end
+    try
         BFLA.copy_owned!(cache.matrix.nzval, A.nzval)
         factor = something(cache.factor)
         # QDLDL update_values! assigns BigFloat object references. Feed it a
@@ -234,10 +241,19 @@ function BFLA.factorize!(
 end
 
 function _validate_solve_authority(cache::BFLASparseLDLCache)
-    _validate_authority(cache)
-    _validate_values(cache.factored_values, cache.precision_bits, "factor snapshot")
-    cache.factor_values_valid && cache.matrix.nzval == cache.factored_values ||
-        throw(ArgumentError("QDLDL sparse LDL numeric factor is stale"))
+    try
+        _validate_authority(cache)
+        _validate_values(
+            cache.factored_values, cache.precision_bits, "factor snapshot",
+        )
+        cache.factor_values_valid && cache.matrix.nzval == cache.factored_values ||
+            throw(ArgumentError("QDLDL sparse LDL numeric factor is stale"))
+    catch
+        # Out-of-band structural/value drift revokes both solve authority and
+        # success diagnostics before the rejection escapes.
+        _revoke_factor!(cache)
+        rethrow()
+    end
     return nothing
 end
 
