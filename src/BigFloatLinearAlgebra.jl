@@ -74,6 +74,28 @@ function BigFloatCholesky(args...; kwargs...)
     return _linearsolve_extension().BigFloatCholesky(args...; kwargs...)
 end
 
+"""Whether the optional QDLDL sparse-LDL extension is loaded."""
+sparse_ldlt_available(::Type{BigFloat}=BigFloat) =
+    Base.get_extension(@__MODULE__, :BigFloatQDLDLExt) !== nothing
+
+"""
+    sparse_ldlt_cache(pattern; precision_bits, kwargs...)
+
+Construct the optional QDLDL-backed sparse LDL cache for a frozen upper-
+triangular BigFloat CSC pattern. QDLDL owns sparse symbolic/numeric LDL; BFLA
+owns explicit precision and BigFloat destination ownership. Absence fails
+closed.
+"""
+function sparse_ldlt_cache(pattern; precision_bits::Integer, kwargs...)
+    extension = Base.get_extension(@__MODULE__, :BigFloatQDLDLExt)
+    extension === nothing && throw(ArgumentError(
+        "load QDLDL before constructing a BigFloat sparse LDL cache",
+    ))
+    return getproperty(extension, :BFLASparseLDLCache)(
+        pattern; precision_bits=Int(precision_bits), kwargs...,
+    )
+end
+
 # A backend that is neither Native nor Generic must fail with an identifiable
 # error rather than falling through to a different backend's kernel.
 for name in (
@@ -214,6 +236,8 @@ export AbstractBFLABackend,
     lu,
     BigFloatLU,
     BigFloatCholesky,
+    sparse_ldlt_available,
+    sparse_ldlt_cache,
     residual!,
     normwise_backward_error,
     higher_precision_residual!,
