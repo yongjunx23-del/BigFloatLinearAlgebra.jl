@@ -3,6 +3,19 @@
 All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.3.0] - 2026-08-30
+
+### Added
+
+- Optional QDLDL sparse signed-LDL cache integration, including explicit
+  provider availability, frozen-pattern, factor-state, and authority-failure
+  handling.  Unsupported sparse QDLDL configurations fail closed.
+
+### Fixed
+
+- Optional QDLDL test dependencies are isolated so the base package and its
+  ordinary factor-cache contract remain independently runnable.
+
 ## [0.2.2] - 2026-08-25
 
 ### Fixed
